@@ -3,7 +3,8 @@ import string
 from typing import List
 import nltk
 from nltk.corpus import stopwords
-from nltk.stem.snowball import SnowballStemmer
+from pymystem3 import Mystem
+
 
 def process_query(query: str) -> str:
     """
@@ -13,15 +14,20 @@ def process_query(query: str) -> str:
     nltk.download('stopwords', quiet=True)
     stop_words = set(stopwords.words('russian'))
 
-    legal_terms = {"статья", "часть", "пункт", "трудовой", "кодекс", "рф"}
+    mystem = Mystem()
+
+    legal_terms = {
+        "статья", "часть", "пункт",
+        "трудовой", "кодекс", "рф",
+        "договор", "работник", "работодатель"
+    }
+
     legal_abbreviations = {
         r"\bst\.\b": "статья",
         r"\bч\.\b": "часть",
         r"\bп\.\b": "пункт",
-        r"\bтк рф\b": "трудовой кодекс рф"
+        r"\bтк\s*рф\b": "трудовой кодекс рф"
     }
-
-    stemmer = SnowballStemmer("russian")
 
     query = query.strip().lower()
 
@@ -31,16 +37,28 @@ def process_query(query: str) -> str:
     query = re.sub(r"[*_#>-]", " ", query)
     query = re.sub(f"[{re.escape(string.punctuation)}]", " ", query)
 
-    tokens = query.split()
+    lemmas = mystem.lemmatize(query)
 
     processed_tokens: List[str] = []
-    for token in tokens:
+
+    for token in lemmas:
+        token = token.strip()
+
+        if not token:
+            continue
+
+        if token.isdigit():
+            processed_tokens.append(token)
+            continue
+
         if token in legal_terms:
             processed_tokens.append(token)
             continue
+
         if token in stop_words:
             continue
-        processed_tokens.append(stemmer.stem(token))
+
+        processed_tokens.append(token)
 
     processed_query = " ".join(processed_tokens)
 
@@ -50,5 +68,6 @@ def process_query(query: str) -> str:
 if __name__ == "__main__":
     user_input = "Ст. 1 ТК РФ: Какие цели трудового законодательства?"
     processed = process_query(user_input)
+
     print("Исходный запрос:", user_input)
     print("Обработанный запрос:", processed)
