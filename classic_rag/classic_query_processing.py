@@ -8,7 +8,24 @@ from pymystem3 import Mystem
 
 def process_query(query: str) -> str:
     """
-    Query Processing
+    Query Processing.
+
+    This function normalizes and preprocesses a user query for further
+    use in classification and retrieval.
+
+    Steps:
+        - Lowercasing
+        - Removing punctuation and noise
+        - Expanding legal abbreviations
+        - Removing stopwords
+        - Applying lemmatization
+
+    Args:
+        query (str): Raw user input
+
+    Returns:
+        str:
+            Normalized query string (tokens joined by space)
     """
 
     nltk.download('stopwords', quiet=True)

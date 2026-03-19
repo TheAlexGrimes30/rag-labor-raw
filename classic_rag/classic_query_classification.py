@@ -14,18 +14,23 @@ QueryType = Literal[
 
 def classify_query(query: str) -> QueryType:
     """
-    Query Classification
+    Query Classification.
 
-    :param: query: str
+    This function determines the intent of a user query
+    using rule-based pattern matching.
+
+    Args:
+        query (str): Raw user query
 
     Returns:
-        QueryType: One of the following categories:
-            - "article_lookup"   : запрос на конкретную статью закона (например: "Ст. 1 ТК РФ")
-            - "concept_search"   : запрос на определение или юридическое понятие (например: "что такое трудовой договор")
-            - "case_analysis"    : описание ситуации пользователя (например: "меня уволили без причины")
-            - "procedure"        : запрос о том, как выполнить действие (например: "как оформить отпуск")
-            - "legality_check"   : проверка законности (например: "законно ли удержание зарплаты")
-            - "general_question" : общий вопрос, не попадающий в другие категории
+        Literal[str]:
+            One of predefined query types:
+                - article_lookup → поиск статьи закона
+                - concept_search → поиск определения/понятия
+                - case_analysis → анализ ситуации пользователя
+                - procedure → как что-то сделать
+                - legality_check → проверка законности
+                - general_question → общий вопрос
     """
 
     query = query.lower().strip()
