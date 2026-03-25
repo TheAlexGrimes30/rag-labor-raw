@@ -14,11 +14,10 @@ class BaseRetriever(ABC):
     def retrieve(self, query: str, k: int = 3) -> List[Document]:
         pass
 
-
 class DenseRetriever(BaseRetriever):
 
     def __init__(self, documents: List[Document]):
-        self.documents = documents
+        print("Initializing DenseRetriever...")
 
         self.embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/multilingual-e5-base"
@@ -28,7 +27,15 @@ class DenseRetriever(BaseRetriever):
 
     def retrieve(self, query: str, k: int = 3) -> List[Document]:
         query = "query: " + query
-        return self.db.similarity_search(query, k=k)
+        docs = self.db.similarity_search(query, k=k)
+
+        unique = {}
+        for d in docs:
+            key = d.metadata["source"]
+            if key not in unique:
+                unique[key] = d
+
+        return list(unique.values())[:k]
 
 class SparseRetriever(BaseRetriever):
 

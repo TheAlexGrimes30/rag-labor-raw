@@ -1,11 +1,12 @@
 import os
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import List, Dict
 
+from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_core.documents import Document
 from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 
 
@@ -15,6 +16,37 @@ class RAGResponse:
     sources: List[Dict]
 
 
+class BaseRetriever(ABC):
+
+    @abstractmethod
+    def retrieve(self, query: str, k: int = 3) -> List[Document]:
+        pass
+
+
+class DenseRetriever(BaseRetriever):
+
+    def __init__(self, documents: List[Document]):
+        print("Initializing DenseRetriever...")
+
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="intfloat/multilingual-e5-base"
+        )
+
+        self.db = FAISS.from_documents(documents, self.embeddings)
+
+    def retrieve(self, query: str, k: int = 3) -> List[Document]:
+        query = "query: " + query
+        docs = self.db.similarity_search(query, k=k)
+
+        unique = {}
+        for d in docs:
+            key = d.metadata["source"]
+            if key not in unique:
+                unique[key] = d
+
+        return list(unique.values())[:k]
+
+
 class QueryClassifier:
 
     def classify(self, query: str) -> str:
@@ -22,13 +54,14 @@ class QueryClassifier:
 
         if any(word in q for word in [
             "что делать", "как поступить", "как быть",
-            "отказали", "не платят", "уволили", "проблема"
+            "отказали", "не платят", "уволили",
+            "проблема", "нарушили", "задерживают"
         ]):
             return "recommendation"
 
         if any(word in q for word in [
-            "что такое", "что означает", "что делает",
-            "что регулирует", "что за", "объясни"
+            "что такое", "что означает", "объясни",
+            "что регулирует", "что делает"
         ]):
             return "law_info"
 
@@ -59,7 +92,6 @@ class Generator:
         context = re.sub(r"Вопрос:.*", "", context, flags=re.IGNORECASE)
         return context.strip()
 
-
     def build_prompt(self, query: str, context: str, query_type: str) -> str:
         context_clean = self.clean_context(context)
 
@@ -73,26 +105,30 @@ class Generator:
 
         if query_type == "qa":
             return f"""
-        Ты юридический ассистент по трудовому праву РФ.
-        
-        {base_rules}
-        
-        Формат:
-        Да/Нет. Статья. Краткое пояснение.
-        
-        Контекст:
-        {context_clean}
-        
-        Вопрос: {query}
-        
-        Ответ:
-        """
+            Ты юридический ассистент по трудовому праву РФ.
+            
+            {base_rules}
+            
+            Формат:
+            Да/Нет. Статья. Краткое пояснение.
+            
+            Контекст:
+            {context_clean}
+            
+            Вопрос: {query}
+            
+            Ответ:
+            """
 
         elif query_type == "recommendation":
             return f"""
             Ты юридический ассистент.
             
             {base_rules}
+            
+            ЗАПРЕЩЕНО:
+            - писать приветствия
+            - писать "уважаемый пользователь"
             
             Формат:
             1. Действие
@@ -105,6 +141,7 @@ class Generator:
             Ситуация: {query}
             
             Ответ:
+            1.
             """
 
         elif query_type == "law_info":
@@ -116,8 +153,6 @@ class Generator:
             Формат:
             Статья: ...
             Описание: ...
-            
-            Без повторов.
             
             Контекст:
             {context_clean}
@@ -131,6 +166,11 @@ class Generator:
 
     def postprocess(self, text: str) -> str:
         text = text.strip()
+
+        if any(x in text.lower() for x in [
+            "уважаемый", "гость", "добро пожаловать"
+        ]):
+            return "Недостаточно информации"
 
         text = re.split(r"Контекст:|Вопрос:", text)[0]
 
@@ -148,7 +188,6 @@ class Generator:
 
         return text.strip()
 
-
     def generate(self, query: str, context: str, query_type: str) -> str:
         if not context.strip():
             return "Недостаточно информации"
@@ -157,14 +196,12 @@ class Generator:
 
         try:
             result = self.pipe(prompt)[0]["generated_text"]
-
-            answer = self.postprocess(result)
-
-            return answer
+            return self.postprocess(result)
 
         except Exception as e:
             print("LLM error:", e)
             return "Ошибка генерации"
+
 
 class ClassicRAG:
 
@@ -178,11 +215,8 @@ class ClassicRAG:
         print("Chunking documents...")
         self.chunks = self.chunk_documents(self.documents)
 
-        print("Loading embeddings...")
-        self.embeddings = self.get_embeddings()
-
-        print("Building FAISS index...")
-        self.vectorstore = self.build_faiss(self.chunks)
+        print("Loading retriever...")
+        self.retriever = DenseRetriever(self.chunks)
 
         print("Loading generator...")
         self.generator = Generator()
@@ -246,31 +280,21 @@ class ClassicRAG:
         print(f"Total chunks: {len(chunks)}")
         return chunks
 
-    def get_embeddings(self):
-        return HuggingFaceEmbeddings(
-            model_name="intfloat/multilingual-e5-base"
-        )
-
-    def build_faiss(self, docs):
-        return FAISS.from_documents(docs, self.embeddings)
-
     def process_query(self, query):
         query = query.lower()
         query = re.sub(r"\bст\.\b", "статья", query)
         query = re.sub(r"\bтк\s*рф\b", "трудовой кодекс рф", query)
         return query
 
-    def retrieve(self, query, k=5):
-        query = "query: " + query
-        docs = self.vectorstore.similarity_search(query, k=k)
+    def retrieve(self, query, query_type):
+        if query_type == "recommendation":
+            k = 5
+        elif query_type == "law_info":
+            k = 3
+        else:
+            k = 4
 
-        unique = {}
-        for d in docs:
-            key = d.metadata["source"]
-            if key not in unique:
-                unique[key] = d
-
-        return list(unique.values())[:3]
+        return self.retriever.retrieve(query, k=k)
 
     def build_context(self, docs):
         cleaned_chunks = []
@@ -284,16 +308,15 @@ class ClassicRAG:
             cleaned_chunks.append(text)
 
         context = "\n\n---\n\n".join(cleaned_chunks)
-        return context[:1500]
+        return context[:1000]
 
     def ask(self, query):
         original_query = query
 
         query_type = self.classifier.classify(query)
-
         query_processed = self.process_query(query)
 
-        docs = self.retrieve(query_processed)
+        docs = self.retrieve(query_processed, query_type)
         context = self.build_context(docs)
 
         print("\n[DEBUG]")
@@ -308,8 +331,6 @@ class ClassicRAG:
             answer=answer,
             sources=[d.metadata for d in docs]
         )
-
-
 
 TEST_QUERIES = [
     "Можно ли употреблять алкоголь на рабочем месте?",
