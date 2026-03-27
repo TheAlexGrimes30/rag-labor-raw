@@ -2,6 +2,7 @@ import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Dict
 
 from rank_bm25 import BM25Okapi
@@ -250,23 +251,41 @@ class ClassicRAG:
         self.classifier = QueryClassifier()
 
     def load_documents(self):
-        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.abspath(os.path.join(BASE_DIR, "..", "rag_db"))
+        base_dir = Path(__file__).resolve().parent
+
+        data_path = base_dir.parent.parent / "rag_db"
+        dense_path = base_dir / "Hybrid"
+
         docs = []
-        for root, _, files in os.walk(data_path):
-            for file in files:
-                if file.endswith(".md"):
-                    full_path = os.path.join(root, file)
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        text = f.read()
-                    if text.strip():
-                        docs.append(
-                            Document(
-                                page_content=text.strip(),
-                                metadata={"source": full_path, "file_name": file}
-                            )
-                        )
-        print(f"Loaded {len(docs)} documents")
+
+        print(f"Scanning for documents in: {data_path}")
+        print(f"Dense storage path: {dense_path}")
+
+        if not data_path.exists():
+            print(f"Directory not found: {data_path}")
+            return docs
+
+        if not dense_path.exists():
+            print(f"WARNING: Hybrid folder not found: {dense_path}")
+
+        for path in data_path.rglob("*.md"):
+            try:
+                text = path.read_text(encoding="utf-8")
+
+                if text.strip():
+                    docs.append(Document(
+                        page_content=text,
+                        metadata={
+                            "source": str(path),
+                            "file_name": path.name,
+                            "relative_path": str(path.relative_to(data_path))
+                        }
+                    ))
+
+            except Exception as e:
+                print(f"Error reading {path}: {e}")
+
+        print(f"Loaded {len(docs)} docs total")
         return docs
 
     def chunk_documents(self, docs):
