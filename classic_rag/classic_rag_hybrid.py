@@ -44,7 +44,7 @@ class Reranker:
 
 class HybridRetriever(BaseRetriever):
 
-    def __init__(self, documents: List[Document], alpha: float = 0.6, reranker: Reranker = None):
+    def __init__(self, documents: List[Document], alpha: float = 0.5, reranker: Reranker = None):
         print("Initializing HybridRetriever with optional Reranker...")
         self.documents = documents
         self.alpha = alpha
@@ -145,102 +145,118 @@ class Generator:
             model_path=str(model_path),
             n_ctx=4096,
             n_threads=8,
-            n_gpu_layers=0
+            n_gpu_layers=0,
+            chat_format=None
         )
 
     def clean_context(self, context: str) -> str:
         context = re.sub(r"#+\s*", "", context)
         context = re.sub(r"Вопрос:.*", "", context, flags=re.IGNORECASE)
+
+        context = re.sub(r"(?i)instruction.*", "", context)
+        context = re.sub(r"(?i)response.*", "", context)
+        context = re.sub(r"<\|.*?\|>", "", context)
+
+        context = re.sub(r"\n{2,}", "\n", context)
+
         return context.strip()
 
     def build_prompt(self, query: str, context: str, query_type: str) -> str:
-        context_clean = self.clean_context(context)
+        context = self.clean_context(context)
+
         base_rules = """
-        Используй ТОЛЬКО информацию из контекста.
+        Отвечай ТОЛЬКО по контексту.
         Если ответа нет — напиши: Недостаточно информации.
         Не придумывай факты.
-        Отвечай кратко.
+        Отвечай кратко и по делу.
+        """
+
+        examples = """
+        ### Примеры:
+        
+        Вопрос: Можно ли употреблять алкоголь на рабочем месте?
+        Ответ: Нет, запрещено Трудовым кодексом РФ.
+        
+        Вопрос: В 15 лет отказали в работе что делать?
+        Ответ:
+        1. Обратиться в трудовую инспекцию.
+        2. Обратиться в органы опеки.
+        
+        Вопрос: Что такое испытательный срок?
+        Ответ: Испытательный срок — период проверки работника перед окончательным трудоустройством.
         """
 
         if query_type == "qa":
-            return f"""
-            Ты юридический ассистент по трудовому праву РФ.
-
-            {base_rules}
-
-            Формат:
-            Да/Нет. Статья. Краткое пояснение.
-
-            Контекст:
-            {context_clean}
-
-            Вопрос: {query}
-
-            Ответ:
-            """
+            task = "Дай точный юридический ответ (да/нет + краткое пояснение)."
 
         elif query_type == "recommendation":
-            return f"""
-            Ты юридический ассистент.
-
-            {base_rules}
-
-            Формат:
-            1. Действие
-            2. Действие
-            Статья: ...
-
-            Контекст:
-            {context_clean}
-
-            Ситуация: {query}
-
-            Ответ:
-            1.
-            """
+            task = "Дай пошаговые рекомендации (1, 2, 3)."
 
         elif query_type == "law_info":
-            return f"""
-            Ты юридический ассистент.
+            task = "Дай краткое определение юридического термина."
 
-            {base_rules}
+        else:
+            task = "Ответь на вопрос."
 
-            Формат:
-            Статья: ...
-            Описание: ...
-
-            Контекст:
-            {context_clean}
-
-            Вопрос: {query}
-
-            Ответ:
-            """
-
-        return ""
+        prompt = f"""
+        Ты юрист по трудовому праву РФ.
+        
+        {base_rules}
+        
+        {examples}
+        
+        ### Задание:
+        {task}
+        
+        ---
+        
+        ### Контекст:
+        {context}
+        
+        ---
+        
+        ### Вопрос:
+        {query}
+        
+        ---
+        
+        ### Ответ:
+        """
+        return prompt
 
     def postprocess(self, text: str) -> str:
         text = text.strip()
-        text = re.split(r"Контекст:|Вопрос:", text)[0]
-        lines = text.split("\n")
-        unique_lines = []
-        for line in lines:
+
+        text = re.split(r"###|Instruction|Response|Контекст:", text)[0]
+
+        lines = []
+        for line in text.split("\n"):
             line = line.strip()
-            if line and line not in unique_lines:
-                unique_lines.append(line)
-        text = "\n".join(unique_lines)
-        return text.strip()
+
+            if (
+                line
+                and len(line) > 3
+                and not line.lower().startswith(("вопрос", "контекст"))
+                and line not in lines
+            ):
+                lines.append(line)
+
+        return "\n".join(lines).strip()
 
     def generate(self, query: str, context: str, query_type: str) -> str:
         if not context.strip():
             return "Недостаточно информации"
+
         prompt = self.build_prompt(query, context, query_type)
+
         try:
             result = self.llm(
                 prompt,
                 max_tokens=200,
-                temperature=0.2,
-                stop=["Вопрос:", "Контекст:"]
+                temperature=0.1,
+                top_p=0.9,
+                repeat_penalty=1.2,
+                stop=["###", "</s>"]
             )
 
             text = result["choices"][0]["text"]
@@ -249,6 +265,7 @@ class Generator:
         except Exception as e:
             print("LLM error:", e)
             return "Ошибка генерации"
+
 
 
 class ClassicRAG:
@@ -320,7 +337,7 @@ class ClassicRAG:
 
     def build_context(self, docs):
         context = "\n\n---\n\n".join(d.page_content for d in docs)
-        return context[:4000]
+        return context
 
     def ask(self, query):
         query_type = self.classifier.classify(query)
