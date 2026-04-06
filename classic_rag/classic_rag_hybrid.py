@@ -2,13 +2,14 @@ import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Dict
 
+from llama_cpp import Llama
 from rank_bm25 import BM25Okapi
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 from sentence_transformers import CrossEncoder
 
 
@@ -128,20 +129,20 @@ class QueryClassifier:
 
 
 class Generator:
-
     def __init__(self):
-        model_name = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-        print("Loading LLM...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(model_name)
-        self.pipe = pipeline(
-            "text-generation",
-            model=self.model,
-            tokenizer=self.tokenizer,
-            max_new_tokens=200,
-            do_sample=False,
-            repetition_penalty=1.2,
-            return_full_text=False
+        print("Loading LLM via llama.cpp...")
+
+        base_dir = Path(__file__).resolve().parent.parent
+        model_path = base_dir / "models" / "Phi-3-mini-4k-instruct-q4.gguf"
+
+        if not model_path.exists():
+            raise FileNotFoundError(f"Модель не найдена: {model_path}")
+
+        self.llm = Llama(
+            model_path=str(model_path),
+            n_ctx=4096,
+            n_threads=8,
+            n_gpu_layers=0
         )
 
     def clean_context(self, context: str) -> str:
@@ -157,29 +158,40 @@ class Generator:
         Не придумывай факты.
         Отвечай кратко.
         """
+
         if query_type == "qa":
             return f"""
             Ты юридический ассистент по трудовому праву РФ.
+
             {base_rules}
+
             Формат:
             Да/Нет. Статья. Краткое пояснение.
+
             Контекст:
             {context_clean}
+
             Вопрос: {query}
+
             Ответ:
             """
 
         elif query_type == "recommendation":
             return f"""
             Ты юридический ассистент.
+
             {base_rules}
+
             Формат:
             1. Действие
             2. Действие
             Статья: ...
+
             Контекст:
             {context_clean}
+
             Ситуация: {query}
+
             Ответ:
             1.
             """
@@ -187,13 +199,18 @@ class Generator:
         elif query_type == "law_info":
             return f"""
             Ты юридический ассистент.
+
             {base_rules}
+
             Формат:
             Статья: ...
             Описание: ...
+
             Контекст:
             {context_clean}
+
             Вопрос: {query}
+
             Ответ:
             """
 
@@ -201,10 +218,6 @@ class Generator:
 
     def postprocess(self, text: str) -> str:
         text = text.strip()
-        if any(x in text.lower() for x in [
-            "уважаемый", "гость", "добро пожаловать"
-        ]):
-            return "Недостаточно информации"
         text = re.split(r"Контекст:|Вопрос:", text)[0]
         lines = text.split("\n")
         unique_lines = []
@@ -212,15 +225,24 @@ class Generator:
             line = line.strip()
             if line and line not in unique_lines:
                 unique_lines.append(line)
-        return "\n".join(unique_lines).strip()
+        text = "\n".join(unique_lines)
+        return text.strip()
 
     def generate(self, query: str, context: str, query_type: str) -> str:
         if not context.strip():
             return "Недостаточно информации"
         prompt = self.build_prompt(query, context, query_type)
         try:
-            result = self.pipe(prompt)[0]["generated_text"]
-            return self.postprocess(result)
+            result = self.llm(
+                prompt,
+                max_tokens=200,
+                temperature=0.2,
+                stop=["Вопрос:", "Контекст:"]
+            )
+
+            text = result["choices"][0]["text"]
+            return self.postprocess(text)
+
         except Exception as e:
             print("LLM error:", e)
             return "Ошибка генерации"
