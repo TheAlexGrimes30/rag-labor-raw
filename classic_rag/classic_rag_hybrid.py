@@ -21,7 +21,6 @@ class RAGResponse:
 
 
 class BaseRetriever(ABC):
-
     @abstractmethod
     def retrieve(self, query: str, k: int = 3) -> List[Document]:
         pass
@@ -31,36 +30,36 @@ def parse_markdown_with_metadata(text: str):
     if text.startswith("---"):
         parts = text.split("---", 2)
         if len(parts) >= 3:
-            yaml_part = parts[1]
-            content_part = parts[2]
-
             try:
-                metadata = yaml.safe_load(yaml_part) or {}
-            except Exception:
+                metadata = yaml.safe_load(parts[1]) or {}
+            except:
                 metadata = {}
-
-            return metadata, content_part.strip()
-
+            return metadata, parts[2].strip()
     return {}, text
 
-class Reranker:
-    def __init__(self, model_name="cross-encoder/ms-marco-MiniLM-L-6-v2"):
-        print("Loading Cross-Encoder Reranker...")
-        self.model = CrossEncoder(model_name)
 
-    def rerank(self, query: str, docs: List[Document], top_k: int = 5) -> List[Document]:
-        pairs = [(query, doc.page_content) for doc in docs]
+class Reranker:
+    def __init__(self):
+        print("Loading Cross-Encoder Reranker...")
+        self.model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
+    def rerank(self, query: str, docs: List[Document], top_k: int = 6):
+        if not docs:
+            return []
+
+        pairs = [(query, d.page_content) for d in docs]
         scores = self.model.predict(pairs)
 
-        ranked_docs = [
-            doc for _, doc in sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-        ]
-        return ranked_docs[:top_k]
+        ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+        return [d for _, d in ranked[:top_k]]
+
+
 
 class HybridRetriever(BaseRetriever):
 
-    def __init__(self, documents: List[Document], alpha: float = 0.6, reranker: Reranker = None):
+    def __init__(self, documents: List[Document], alpha: float = 0.7, reranker=None):
         print("Initializing HybridRetriever...")
+
         self.documents = documents
         self.alpha = alpha
         self.reranker = reranker
@@ -68,86 +67,78 @@ class HybridRetriever(BaseRetriever):
         self.embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/multilingual-e5-base"
         )
+
         self.db = FAISS.from_documents(documents, self.embeddings)
 
-        self.corpus = [self.tokenize(doc.page_content) for doc in documents]
+        self.corpus = [self._tokenize(d.page_content) for d in documents]
         self.bm25 = BM25Okapi(self.corpus)
 
-    def tokenize(self, text: str):
+    def _tokenize(self, text: str):
         text = text.lower()
         text = re.sub(r"[^\w\s]", " ", text)
         return text.split()
 
-    def normalize(self, scores_dict):
-        values = list(scores_dict.values())
-        if not values:
-            return scores_dict
+    def _normalize(self, scores: dict):
+        vals = list(scores.values())
+        if not vals:
+            return scores
 
-        min_v, max_v = min(values), max(values)
-        if max_v - min_v < 1e-8:
-            return {k: 0 for k in scores_dict}
+        mn, mx = min(vals), max(vals)
+        if abs(mx - mn) < 1e-8:
+            return {k: 0 for k in scores}
 
-        return {k: (v - min_v) / (max_v - min_v) for k, v in scores_dict.items()}
+        return {k: (v - mn) / (mx - mn) for k, v in scores.items()}
 
-    def retrieve(self, query: str, k: int = 3) -> List[Document]:
+    def retrieve(self, query: str, k: int = 3):
 
-        dense_results = self.db.similarity_search_with_score(
+        dense = self.db.similarity_search_with_score(
             "query: " + query,
-            k=len(self.documents)
+            k=min(40, len(self.documents))
         )
-        dense_scores = {doc.page_content: score for doc, score in dense_results}
 
-        tokenized_query = self.tokenize(query)
-        sparse_scores_array = self.bm25.get_scores(tokenized_query)
-        sparse_scores = {
-            self.documents[i].page_content: sparse_scores_array[i]
+        dense_scores = {d.page_content: s for d, s in dense}
+
+        tokenized = self._tokenize(query)
+        bm25_scores_arr = self.bm25.get_scores(tokenized)
+
+        bm25_scores = {
+            self.documents[i].page_content: bm25_scores_arr[i]
             for i in range(len(self.documents))
         }
+        dense_n = self._normalize(dense_scores)
+        bm25_n = self._normalize(bm25_scores)
 
-        dense_norm = self.normalize(dense_scores)
-        sparse_norm = self.normalize(sparse_scores)
-
-        combined_scores = {}
+        combined = {}
         for doc in self.documents:
-            content = doc.page_content
-            d = dense_norm.get(content, 0)
-            s = sparse_norm.get(content, 0)
-            combined_scores[content] = self.alpha * d + (1 - self.alpha) * s
+            c = doc.page_content
+            combined[c] = (
+                self.alpha * dense_n.get(c, 0)
+                + (1 - self.alpha) * bm25_n.get(c, 0)
+            )
 
-        ranked_docs = sorted(
+        ranked = sorted(
             self.documents,
-            key=lambda d: combined_scores.get(d.page_content, 0),
+            key=lambda d: combined.get(d.page_content, 0),
             reverse=True
         )
+        seen = set()
+        filtered = []
 
-        unique = {}
-        for d in ranked_docs:
-            key = d.metadata.get("id", d.metadata.get("source"))
-            if key not in unique:
-                unique[key] = d
+        for d in ranked:
+            key = d.metadata.get("id") or d.metadata.get("source")
+            if key not in seen:
+                seen.add(key)
+                filtered.append(d)
 
-        docs_top = list(unique.values())[:k * 2]
-
+        top = filtered[:25]
         if self.reranker:
-            docs_top = self.reranker.rerank(query, docs_top, top_k=k)
+            top = self.reranker.rerank(query, top, top_k=max(k, 6))
 
-        return docs_top
-
-
-class QueryClassifier:
-    def classify(self, query: str) -> str:
-        q = query.lower()
-
-        if any(w in q for w in ["что делать", "не платят", "уволили", "нарушили"]):
-            return "recommendation"
-
-        if any(w in q for w in ["что такое", "объясни", "что означает"]):
-            return "law_info"
-
-        return "qa"
+        return top[:k]
 
 
 class Generator:
+
     def __init__(self):
         print("Loading LLM...")
 
@@ -157,32 +148,56 @@ class Generator:
         self.llm = Llama(
             model_path=str(model_path),
             n_ctx=4096,
-            n_threads=8
+            n_threads=8,
+            temperature=0.25,
+            top_p=0.9,
+            repeat_penalty=1.15,
         )
 
-    def clean_context(self, context: str):
-        context = re.sub(r"#+\s*", "", context)
-        return context.strip()
+    def clean_context(self, text: str):
+        text = re.sub(r"#+", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
-    def build_prompt(self, query, context):
+    def build_prompt(self, query: str, context: str):
+
         return f"""
-        Ты юридический ассистент.
+        Ты — юридический помощник по трудовому праву Российской Федерации.
         
-        Используй только контекст.
+        ЗАДАЧА:
+        Ответь на вопрос пользователя строго на основе контекста.
         
-        Контекст:
+        ПРАВИЛА:
+        - Используй контекст в первую очередь
+        - Если в контексте нет точного ответа — скажи:
+          "В предоставленном контексте нет точного ответа"
+        - НЕ выдумывай статьи, номера законов и нормы
+        - Если контекст неполный — дай общий юридически корректный ответ БЕЗ ссылок на статьи
+        - Ответ должен быть кратким (3–6 предложений)
+        - Пиши на русском языке
+        
+        КОНТЕКСТ:
         {context}
         
-        Вопрос: {query}
+        ВОПРОС:
+        {query}
         
-        Ответ:
-        """
+        ОТВЕТ:
+        """.strip()
 
-    def generate(self, query, context):
+    def generate(self, query: str, context: str):
+
+        context = self.clean_context(context)
         prompt = self.build_prompt(query, context)
 
-        result = self.llm(prompt, max_tokens=200)
-        return result["choices"][0]["text"].strip()
+        output = self.llm(
+            prompt,
+            max_tokens=250,
+            stop=["ВОПРОС:", "КОНТЕКСТ:", "ОТВЕТ:"]
+        )
+
+        return output["choices"][0]["text"].strip()
+
 
 
 class ClassicRAG:
@@ -197,56 +212,46 @@ class ClassicRAG:
         self.reranker = Reranker()
         self.retriever = HybridRetriever(self.chunks, reranker=self.reranker)
         self.generator = Generator()
-        self.classifier = QueryClassifier()
 
     def load_documents(self):
-        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(BASE_DIR, "..", "rag_db")
+        base = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, "..", "rag_db")
 
         docs = []
 
-        for root, _, files in os.walk(data_path):
-            for file in files:
-                if file.endswith(".md"):
-                    path = os.path.join(root, file)
+        for root, _, files in os.walk(path):
+            for f in files:
+                if f.endswith(".md"):
+                    full = os.path.join(root, f)
 
-                    with open(path, "r", encoding="utf-8") as f:
-                        raw = f.read()
+                    with open(full, "r", encoding="utf-8") as file:
+                        raw = file.read()
 
-                    metadata, content = parse_markdown_with_metadata(raw)
+                    meta, content = parse_markdown_with_metadata(raw)
 
-                    metadata.update({
-                        "source": path,
-                        "file_name": file
-                    })
+                    meta.update({"source": full, "file": f})
 
-                    docs.append(
-                        Document(
-                            page_content=content,
-                            metadata=metadata
-                        )
-                    )
+                    docs.append(Document(page_content=content, metadata=meta))
 
-        print(f"Loaded {len(docs)} documents")
+        print(f"Loaded {len(docs)} docs")
         return docs
 
     def chunk_documents(self, docs):
         chunks = []
 
-        for doc in docs:
-            sections = re.split(r"\n### |\n## ", doc.page_content)
+        for d in docs:
+            parts = re.split(r"\n## |\n### ", d.page_content)
 
-            for sec in sections:
-                sec = sec.strip()
-                if len(sec) < 100:
+            for p in parts:
+                p = p.strip()
+
+                if len(p) < 80:
                     continue
 
-                chunks.append(
-                    Document(
-                        page_content=sec,
-                        metadata=doc.metadata
-                    )
-                )
+                chunks.append(Document(
+                    page_content=p,
+                    metadata=d.metadata
+                ))
 
         print(f"Total chunks: {len(chunks)}")
         return chunks
@@ -258,12 +263,17 @@ class ClassicRAG:
         parts = []
 
         for d in docs:
-            article_id = d.metadata.get("id", "")
-            parts.append(f"[{article_id}]\n{d.page_content}")
+            src = d.metadata.get("file", "unknown")
 
-        return "\n\n---\n\n".join(parts)[:4000]
+            if len(d.page_content) < 100:
+                continue
 
-    def ask(self, query):
+            parts.append(f"[SOURCE: {src}]\n{d.page_content}")
+
+        return "\n\n---\n\n".join(parts)[:4500]
+
+    def ask(self, query: str):
+
         docs = self.retrieve(query)
         context = self.build_context(docs)
 
@@ -274,19 +284,15 @@ class ClassicRAG:
             sources=[d.metadata for d in docs]
         )
 
-
 if __name__ == "__main__":
+
     rag = ClassicRAG()
 
     questions = [
         "какие цели трудового законодательства",
         "что регулирует трудовое законодательство",
-
         "что такое свобода труда",
         "какие принципы трудового права",
-
-        "что считается дискриминацией в труде",
-        "можно ли отказать в работе из-за возраста"
     ]
 
     for q in questions:
