@@ -29,12 +29,22 @@ class BaseRetriever(ABC):
 def parse_markdown_with_metadata(text: str):
     if text.startswith("---"):
         parts = text.split("---", 2)
+
         if len(parts) >= 3:
             try:
                 metadata = yaml.safe_load(parts[1]) or {}
             except:
                 metadata = {}
-            return metadata, parts[2].strip()
+
+            content = parts[2].strip()
+
+            classic = metadata.get("classic_rag", {})
+            topics = classic.get("topics", [])
+
+            metadata["topics"] = topics
+
+            return metadata, content
+
     return {}, text
 
 
@@ -236,22 +246,49 @@ class ClassicRAG:
         print(f"Loaded {len(docs)} docs")
         return docs
 
-    def chunk_documents(self, docs):
+    def chunk_documents(self, docs,
+                        chunk_size: int = 800,
+                        chunk_overlap: int = 150):
+
         chunks = []
 
         for d in docs:
-            parts = re.split(r"\n## |\n### ", d.page_content)
+            text = re.sub(r"\n{3,}", "\n\n", d.page_content).strip()
 
-            for p in parts:
-                p = p.strip()
+            sentences = re.split(r"(?<=[.!?])\s+", text)
 
-                if len(p) < 80:
-                    continue
+            current_chunk = []
+            current_len = 0
 
-                chunks.append(Document(
-                    page_content=p,
-                    metadata=d.metadata
-                ))
+            for sent in sentences:
+                sent_len = len(sent)
+
+                if current_len + sent_len > chunk_size:
+
+                    chunk_text = " ".join(current_chunk).strip()
+
+                    if len(chunk_text) > 120:
+                        chunks.append(Document(
+                            page_content=chunk_text,
+                            metadata=d.metadata
+                        ))
+
+                    overlap_text = chunk_text[-chunk_overlap:] if chunk_overlap > 0 else ""
+
+                    current_chunk = [overlap_text] if overlap_text else []
+                    current_len = len(overlap_text)
+
+                current_chunk.append(sent)
+                current_len += sent_len
+
+            if current_chunk:
+                chunk_text = " ".join(current_chunk).strip()
+
+                if len(chunk_text) > 120:
+                    chunks.append(Document(
+                        page_content=chunk_text,
+                        metadata=d.metadata
+                    ))
 
         print(f"Total chunks: {len(chunks)}")
         return chunks
