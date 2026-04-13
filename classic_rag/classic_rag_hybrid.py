@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict
 
+import yaml
 from llama_cpp import Llama
 from rank_bm25 import BM25Okapi
 from langchain_core.documents import Document
@@ -26,8 +27,23 @@ class BaseRetriever(ABC):
         pass
 
 
-class Reranker:
+def parse_markdown_with_metadata(text: str):
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) >= 3:
+            yaml_part = parts[1]
+            content_part = parts[2]
 
+            try:
+                metadata = yaml.safe_load(yaml_part) or {}
+            except Exception:
+                metadata = {}
+
+            return metadata, content_part.strip()
+
+    return {}, text
+
+class Reranker:
     def __init__(self, model_name="cross-encoder/ms-marco-MiniLM-L-6-v2"):
         print("Loading Cross-Encoder Reranker...")
         self.model = CrossEncoder(model_name)
@@ -35,14 +51,16 @@ class Reranker:
     def rerank(self, query: str, docs: List[Document], top_k: int = 5) -> List[Document]:
         pairs = [(query, doc.page_content) for doc in docs]
         scores = self.model.predict(pairs)
-        ranked_docs = [doc for _, doc in sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)]
-        return ranked_docs[:top_k]
 
+        ranked_docs = [
+            doc for _, doc in sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
+        ]
+        return ranked_docs[:top_k]
 
 class HybridRetriever(BaseRetriever):
 
     def __init__(self, documents: List[Document], alpha: float = 0.6, reranker: Reranker = None):
-        print("Initializing HybridRetriever with optional Reranker...")
+        print("Initializing HybridRetriever...")
         self.documents = documents
         self.alpha = alpha
         self.reranker = reranker
@@ -52,10 +70,7 @@ class HybridRetriever(BaseRetriever):
         )
         self.db = FAISS.from_documents(documents, self.embeddings)
 
-        self.corpus = [
-            self.tokenize(doc.page_content)
-            for doc in documents
-        ]
+        self.corpus = [self.tokenize(doc.page_content) for doc in documents]
         self.bm25 = BM25Okapi(self.corpus)
 
     def tokenize(self, text: str):
@@ -67,9 +82,11 @@ class HybridRetriever(BaseRetriever):
         values = list(scores_dict.values())
         if not values:
             return scores_dict
+
         min_v, max_v = min(values), max(values)
         if max_v - min_v < 1e-8:
             return {k: 0 for k in scores_dict}
+
         return {k: (v - min_v) / (max_v - min_v) for k, v in scores_dict.items()}
 
     def retrieve(self, query: str, k: int = 3) -> List[Document]:
@@ -82,10 +99,14 @@ class HybridRetriever(BaseRetriever):
 
         tokenized_query = self.tokenize(query)
         sparse_scores_array = self.bm25.get_scores(tokenized_query)
-        sparse_scores = {self.documents[i].page_content: sparse_scores_array[i] for i in range(len(self.documents))}
+        sparse_scores = {
+            self.documents[i].page_content: sparse_scores_array[i]
+            for i in range(len(self.documents))
+        }
 
         dense_norm = self.normalize(dense_scores)
         sparse_norm = self.normalize(sparse_scores)
+
         combined_scores = {}
         for doc in self.documents:
             content = doc.page_content
@@ -93,14 +114,19 @@ class HybridRetriever(BaseRetriever):
             s = sparse_norm.get(content, 0)
             combined_scores[content] = self.alpha * d + (1 - self.alpha) * s
 
-        ranked_docs = sorted(self.documents, key=lambda d: combined_scores.get(d.page_content, 0), reverse=True)
+        ranked_docs = sorted(
+            self.documents,
+            key=lambda d: combined_scores.get(d.page_content, 0),
+            reverse=True
+        )
 
         unique = {}
         for d in ranked_docs:
-            key = d.metadata["source"]
+            key = d.metadata.get("id", d.metadata.get("source"))
             if key not in unique:
                 unique[key] = d
-        docs_top = list(unique.values())[:k*2]
+
+        docs_top = list(unique.values())[:k * 2]
 
         if self.reranker:
             docs_top = self.reranker.rerank(query, docs_top, top_k=k)
@@ -109,20 +135,13 @@ class HybridRetriever(BaseRetriever):
 
 
 class QueryClassifier:
-
     def classify(self, query: str) -> str:
         q = query.lower()
-        if any(word in q for word in [
-            "что делать", "как поступить", "как быть",
-            "отказали", "не платят", "уволили",
-            "проблема", "нарушили", "задерживают"
-        ]):
+
+        if any(w in q for w in ["что делать", "не платят", "уволили", "нарушили"]):
             return "recommendation"
 
-        if any(word in q for word in [
-            "что такое", "что означает", "объясни",
-            "что регулирует", "что делает"
-        ]):
+        if any(w in q for w in ["что такое", "объясни", "что означает"]):
             return "law_info"
 
         return "qa"
@@ -130,122 +149,40 @@ class QueryClassifier:
 
 class Generator:
     def __init__(self):
-        print("Loading LLM via llama.cpp...")
+        print("Loading LLM...")
 
         base_dir = Path(__file__).resolve().parent.parent
         model_path = base_dir / "models" / "Phi-3-mini-4k-instruct-q4.gguf"
 
-        if not model_path.exists():
-            raise FileNotFoundError(f"Модель не найдена: {model_path}")
-
         self.llm = Llama(
             model_path=str(model_path),
             n_ctx=4096,
-            n_threads=8,
-            n_gpu_layers=0
+            n_threads=8
         )
 
-    def clean_context(self, context: str) -> str:
+    def clean_context(self, context: str):
         context = re.sub(r"#+\s*", "", context)
-        context = re.sub(r"Вопрос:.*", "", context, flags=re.IGNORECASE)
         return context.strip()
 
-    def build_prompt(self, query: str, context: str, query_type: str) -> str:
-        context_clean = self.clean_context(context)
-        base_rules = """
-        Используй ТОЛЬКО информацию из контекста.
-        Если ответа нет — напиши: Недостаточно информации.
-        Не придумывай факты.
-        Отвечай кратко.
+    def build_prompt(self, query, context):
+        return f"""
+        Ты юридический ассистент.
+        
+        Используй только контекст.
+        
+        Контекст:
+        {context}
+        
+        Вопрос: {query}
+        
+        Ответ:
         """
 
-        if query_type == "qa":
-            return f"""
-            Ты юридический ассистент по трудовому праву РФ.
+    def generate(self, query, context):
+        prompt = self.build_prompt(query, context)
 
-            {base_rules}
-
-            Формат:
-            Да/Нет. Статья. Краткое пояснение.
-
-            Контекст:
-            {context_clean}
-
-            Вопрос: {query}
-
-            Ответ:
-            """
-
-        elif query_type == "recommendation":
-            return f"""
-            Ты юридический ассистент.
-
-            {base_rules}
-
-            Формат:
-            1. Действие
-            2. Действие
-            Статья: ...
-
-            Контекст:
-            {context_clean}
-
-            Ситуация: {query}
-
-            Ответ:
-            1.
-            """
-
-        elif query_type == "law_info":
-            return f"""
-            Ты юридический ассистент.
-
-            {base_rules}
-
-            Формат:
-            Статья: ...
-            Описание: ...
-
-            Контекст:
-            {context_clean}
-
-            Вопрос: {query}
-
-            Ответ:
-            """
-
-        return ""
-
-    def postprocess(self, text: str) -> str:
-        text = text.strip()
-        text = re.split(r"Контекст:|Вопрос:", text)[0]
-        lines = text.split("\n")
-        unique_lines = []
-        for line in lines:
-            line = line.strip()
-            if line and line not in unique_lines:
-                unique_lines.append(line)
-        text = "\n".join(unique_lines)
-        return text.strip()
-
-    def generate(self, query: str, context: str, query_type: str) -> str:
-        if not context.strip():
-            return "Недостаточно информации"
-        prompt = self.build_prompt(query, context, query_type)
-        try:
-            result = self.llm(
-                prompt,
-                max_tokens=200,
-                temperature=0.2,
-                stop=["Вопрос:", "Контекст:"]
-            )
-
-            text = result["choices"][0]["text"]
-            return self.postprocess(text)
-
-        except Exception as e:
-            print("LLM error:", e)
-            return "Ошибка генерации"
+        result = self.llm(prompt, max_tokens=200)
+        return result["choices"][0]["text"].strip()
 
 
 class ClassicRAG:
@@ -253,100 +190,106 @@ class ClassicRAG:
     def __init__(self):
         print("Loading documents...")
         self.documents = self.load_documents()
-        if not self.documents:
-            raise ValueError("No documents loaded!")
 
-        print("Chunking documents...")
+        print("Chunking...")
         self.chunks = self.chunk_documents(self.documents)
 
-        print("Loading Reranker...")
         self.reranker = Reranker()
-
-        print("Loading Hybrid retriever...")
-        self.retriever = HybridRetriever(self.chunks, alpha=0.6, reranker=self.reranker)
-
-        print("Loading generator...")
+        self.retriever = HybridRetriever(self.chunks, reranker=self.reranker)
         self.generator = Generator()
-
-        print("Loading classifier...")
         self.classifier = QueryClassifier()
 
     def load_documents(self):
         BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.abspath(os.path.join(BASE_DIR, "..", "rag_db"))
+        data_path = os.path.join(BASE_DIR, "..", "rag_db")
+
         docs = []
+
         for root, _, files in os.walk(data_path):
             for file in files:
                 if file.endswith(".md"):
-                    full_path = os.path.join(root, file)
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        text = f.read()
-                    if text.strip():
-                        docs.append(
-                            Document(
-                                page_content=text.strip(),
-                                metadata={"source": full_path, "file_name": file}
-                            )
+                    path = os.path.join(root, file)
+
+                    with open(path, "r", encoding="utf-8") as f:
+                        raw = f.read()
+
+                    metadata, content = parse_markdown_with_metadata(raw)
+
+                    metadata.update({
+                        "source": path,
+                        "file_name": file
+                    })
+
+                    docs.append(
+                        Document(
+                            page_content=content,
+                            metadata=metadata
                         )
+                    )
+
         print(f"Loaded {len(docs)} documents")
         return docs
 
     def chunk_documents(self, docs):
-        chunk_size = 500
-        overlap = 100
         chunks = []
+
         for doc in docs:
-            text = doc.page_content
-            for i in range(0, len(text), chunk_size - overlap):
-                chunk = text[i:i + chunk_size]
-                if len(chunk.strip()) < 100:
+            sections = re.split(r"\n### |\n## ", doc.page_content)
+
+            for sec in sections:
+                sec = sec.strip()
+                if len(sec) < 100:
                     continue
-                chunks.append(Document(page_content=chunk, metadata=doc.metadata))
+
+                chunks.append(
+                    Document(
+                        page_content=sec,
+                        metadata=doc.metadata
+                    )
+                )
+
         print(f"Total chunks: {len(chunks)}")
         return chunks
 
-    def process_query(self, query):
-        query = query.lower()
-        query = re.sub(r"\bст\.\b", "статья", query)
-        query = re.sub(r"\bтк\s*рф\b", "трудовой кодекс рф", query)
-        return query
-
-    def retrieve(self, query, query_type):
-        k = 5 if query_type == "recommendation" else 3
-        return self.retriever.retrieve(query, k=k)
+    def retrieve(self, query):
+        return self.retriever.retrieve(query, k=3)
 
     def build_context(self, docs):
-        context = "\n\n---\n\n".join(d.page_content for d in docs)
-        return context[:4000]
+        parts = []
+
+        for d in docs:
+            article_id = d.metadata.get("id", "")
+            parts.append(f"[{article_id}]\n{d.page_content}")
+
+        return "\n\n---\n\n".join(parts)[:4000]
 
     def ask(self, query):
-        query_type = self.classifier.classify(query)
-        query_processed = self.process_query(query)
-        docs = self.retrieve(query_processed, query_type)
+        docs = self.retrieve(query)
         context = self.build_context(docs)
-        print("\n[DEBUG]")
-        print("Query:", query)
-        print("Type:", query_type)
-        print("Retrieved:", [d.metadata["file_name"] for d in docs])
-        answer = self.generator.generate(query, context, query_type)
-        return RAGResponse(answer=answer, sources=[d.metadata for d in docs])
 
+        answer = self.generator.generate(query, context)
 
-TEST_QUERIES = [
-    "Можно ли употреблять алкоголь на рабочем месте?",
-    "В 15 лет отказали в работе что делать?",
-    "Объясни что такое испытательный срок"
-]
-
-
-def run_tests(rag: ClassicRAG):
-    for q in TEST_QUERIES:
-        print("\n========================")
-        print("Q:", q)
-        result = rag.ask(q)
-        print("A:", result.answer)
+        return RAGResponse(
+            answer=answer,
+            sources=[d.metadata for d in docs]
+        )
 
 
 if __name__ == "__main__":
     rag = ClassicRAG()
-    run_tests(rag)
+
+    questions = [
+        "какие цели трудового законодательства",
+        "что регулирует трудовое законодательство",
+
+        "что такое свобода труда",
+        "какие принципы трудового права",
+
+        "что считается дискриминацией в труде",
+        "можно ли отказать в работе из-за возраста"
+    ]
+
+    for q in questions:
+        print("\nQ:", q)
+        res = rag.ask(q)
+        print("A:", res.answer)
