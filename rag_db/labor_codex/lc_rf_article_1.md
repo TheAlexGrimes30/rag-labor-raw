@@ -1,57 +1,46 @@
 ---
 id: lc_rf_article_1
-law: Трудовой кодекс Российской Федерации
-law_code: tk_rf
-article: 1
-
-title: Цели и задачи трудового законодательства
-section: general_provisions
-
-tags:
-  - labor_law
-  - labor_relations
-  - legal_principles
-
-keywords:
-  - трудовое законодательство
-  - трудовые отношения
-  - работник
-  - работодатель
-  - социальное партнерство
-  - трудовые права
-
-summary: >
-  Статья 1 Трудового кодекса Российской Федерации определяет цели и задачи
-  трудового законодательства. Основные цели — установление государственных
-  гарантий трудовых прав граждан, создание благоприятных условий труда и
-  защита интересов работников и работодателей.
-
-related_concepts:
-  - labor_law
-  - labor_relations
-  - social_partnership
-  - labor_dispute
-  - occupational_safety
-
-related_articles:
-  - lc_rf_article_2
-  - lc_rf_article_15
-  - lc_rf_article_16
-  - lc_rf_article_21
-  - lc_rf_article_22
-  - lc_rf_article_56
-
-related_regulations:
-  - fz_255_sick_leave
-  - fz_125_work_accidents
 
 source: Трудовой кодекс Российской Федерации
 
-explanation:
-  - Статья закрепляет цели трудового законодательства РФ.
-  - Устанавливает основу правового регулирования трудовых отношений.
-  - Направлена на защиту прав работников и работодателей.
-  - Определяет направления регулирования отношений в сфере труда.
+tree_rag:
+  hierarchy:
+    level: article
+    parent: lc_rf_section_general_provisions
+
+  navigation:
+    next: lc_rf_article_2
+
+graph_rag:
+  relations:
+    - type: RELATED
+      target: lc_rf_article_15
+
+    - type: RELATED
+      target: lc_rf_article_16
+
+    - type: RELATED
+      target: lc_rf_article_21
+
+    - type: RELATED
+      target: lc_rf_article_22
+
+    - type: RELATED
+      target: lc_rf_article_56
+
+    - type: REFERENCES
+      target: fz_255_sick_leave
+
+    - type: REFERENCES
+      target: fz_125_work_accidents
+
+classic_rag:
+  topics:
+    - labor_law
+    - labor_relations
+    - social_partnership
+    - labor_rights
+
 ---
 
 # Статья 1 ТК РФ
