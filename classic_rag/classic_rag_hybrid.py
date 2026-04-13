@@ -246,9 +246,7 @@ class ClassicRAG:
         print(f"Loaded {len(docs)} docs")
         return docs
 
-    def chunk_documents(self, docs,
-                        chunk_size: int = 800,
-                        chunk_overlap: int = 150):
+    def chunk_documents(self, docs, chunk_size: int = 800, overlap_sentences: int = 2):
 
         chunks = []
 
@@ -257,7 +255,7 @@ class ClassicRAG:
 
             sentences = re.split(r"(?<=[.!?])\s+", text)
 
-            current_chunk = []
+            current = []
             current_len = 0
 
             for sent in sentences:
@@ -265,7 +263,7 @@ class ClassicRAG:
 
                 if current_len + sent_len > chunk_size:
 
-                    chunk_text = " ".join(current_chunk).strip()
+                    chunk_text = " ".join(current).strip()
 
                     if len(chunk_text) > 120:
                         chunks.append(Document(
@@ -273,16 +271,14 @@ class ClassicRAG:
                             metadata=d.metadata
                         ))
 
-                    overlap_text = chunk_text[-chunk_overlap:] if chunk_overlap > 0 else ""
+                    current = current[-overlap_sentences:]
+                    current_len = sum(len(x) for x in current)
 
-                    current_chunk = [overlap_text] if overlap_text else []
-                    current_len = len(overlap_text)
-
-                current_chunk.append(sent)
+                current.append(sent)
                 current_len += sent_len
 
-            if current_chunk:
-                chunk_text = " ".join(current_chunk).strip()
+            if current:
+                chunk_text = " ".join(current).strip()
 
                 if len(chunk_text) > 120:
                     chunks.append(Document(
