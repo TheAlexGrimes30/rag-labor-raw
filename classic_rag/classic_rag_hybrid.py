@@ -305,7 +305,7 @@ class ClassicRAG:
 
         return "\n\n---\n\n".join(parts)[:4500]
 
-    def ask(self, query: str):
+    def ask(self, query: str) -> RAGResponse:
 
         docs = self.retrieve(query)
         context = self.build_context(docs)
