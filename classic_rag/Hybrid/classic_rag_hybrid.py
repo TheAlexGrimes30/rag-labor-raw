@@ -1,4 +1,3 @@
-import os
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -24,28 +23,6 @@ class BaseRetriever(ABC):
     @abstractmethod
     def retrieve(self, query: str, k: int = 3) -> List[Document]:
         pass
-
-
-def parse_markdown_with_metadata(text: str):
-    if text.startswith("---"):
-        parts = text.split("---", 2)
-
-        if len(parts) >= 3:
-            try:
-                metadata = yaml.safe_load(parts[1]) or {}
-            except:
-                metadata = {}
-
-            content = parts[2].strip()
-
-            classic = metadata.get("classic_rag", {})
-            topics = classic.get("topics", [])
-
-            metadata["topics"] = topics
-
-            return metadata, content
-
-    return {}, text
 
 
 class Reranker:
@@ -152,7 +129,7 @@ class Generator:
     def __init__(self):
         print("Loading LLM...")
 
-        base_dir = Path(__file__).resolve().parent.parent
+        base_dir = Path(__file__).resolve().parent.parent.parent
         model_path = base_dir / "models" / "Phi-3-mini-4k-instruct-q4.gguf"
 
         self.llm = Llama(
@@ -223,25 +200,54 @@ class ClassicRAG:
         self.retriever = HybridRetriever(self.chunks, reranker=self.reranker)
         self.generator = Generator()
 
+    def parse_markdown_with_metadata(self, text: str):
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+
+            if len(parts) >= 3:
+                try:
+                    metadata = yaml.safe_load(parts[1]) or {}
+                except:
+                    metadata = {}
+
+                content = parts[2].strip()
+
+                classic = metadata.get("classic_rag", {})
+                topics = classic.get("topics", [])
+
+                metadata["topics"] = topics
+
+                return metadata, content
+
+        return {}, text
+
     def load_documents(self):
-        base = os.path.dirname(os.path.abspath(__file__))
-        path = os.path.join(base, "..", "rag_db")
+        base_path = Path(__file__).resolve()
+
+        project_root = base_path.parents[2]
+
+        rag_db_path = project_root / "rag_db"
 
         docs = []
 
-        for root, _, files in os.walk(path):
-            for f in files:
-                if f.endswith(".md"):
-                    full = os.path.join(root, f)
+        for file_path in rag_db_path.rglob("*.md"):
+            try:
+                raw = file_path.read_text(encoding="utf-8")
+            except Exception:
+                continue
 
-                    with open(full, "r", encoding="utf-8") as file:
-                        raw = file.read()
+            meta, content = self.parse_markdown_with_metadata(raw)
 
-                    meta, content = parse_markdown_with_metadata(raw)
+            meta.update({
+                "source": str(file_path),
+                "file": file_path.name,
+                "root_source": rag_db_path.name
+            })
 
-                    meta.update({"source": full, "file": f})
-
-                    docs.append(Document(page_content=content, metadata=meta))
+            docs.append(Document(
+                page_content=content,
+                metadata=meta
+            ))
 
         print(f"Loaded {len(docs)} docs")
         return docs
