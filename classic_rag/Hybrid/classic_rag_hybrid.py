@@ -28,11 +28,35 @@ class BaseRetriever(ABC):
 
 
 class Reranker:
-    def __init__(self):
-        print("Loading Cross-Encoder Reranker...")
-        self.model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+    """
+    Cross-encoder based reranker for ranking retrieved documents by relevance.
 
-    def rerank(self, query: str, docs: List[Document], top_k: int = 6):
+    This class uses a sentence-transformers CrossEncoder model to score
+    (query, document) pairs and return the most relevant documents.
+    """
+
+    def __init__(self):
+        """
+        Initialize the reranker model.
+        Loads a pretrained CrossEncoder model for relevance scoring.
+        """
+
+        print("Loading Cross-Encoder Reranker...")
+        self.model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")
+
+    def rerank(self, query: str, docs: List[Document], top_k: int = 6) -> List[Document]:
+        """
+        Rerank a list of documents based on their relevance to the query.
+
+        Args:
+            query (str): The user query.
+            docs (List[Document]): List of retrieved documents to rerank.
+            top_k (int, optional): Number of top documents to return. Defaults to 6.
+
+        Returns:
+            List[Document]: Top-k documents sorted by relevance (descending).
+        """
+
         if not docs:
             return []
 
@@ -45,7 +69,7 @@ class Reranker:
 
 class HybridRetriever(BaseRetriever):
 
-    def __init__(self, documents: List[Document], alpha: float = 0.7, reranker=None):
+    def __init__(self, documents: List[Document], alpha: float = 0.7, reranker: Reranker = None):
         print("Initializing HybridRetriever...")
 
         self.documents = documents
