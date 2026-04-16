@@ -9,7 +9,9 @@ from llama_cpp import Llama
 from rank_bm25 import BM25Okapi
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, VectorParams
+from langchain_qdrant import QdrantVectorStore
 from sentence_transformers import CrossEncoder
 
 
@@ -41,7 +43,6 @@ class Reranker:
         return [d for _, d in ranked[:top_k]]
 
 
-
 class HybridRetriever(BaseRetriever):
 
     def __init__(self, documents: List[Document], alpha: float = 0.7, reranker=None):
@@ -55,8 +56,35 @@ class HybridRetriever(BaseRetriever):
             model_name="intfloat/multilingual-e5-base"
         )
 
-        self.db = FAISS.from_documents(documents, self.embeddings)
+        self.client = QdrantClient(host="localhost", port=6333)
+        self.collection_name = "labor_law"
 
+        existing = [
+            c.name for c in self.client.get_collections().collections
+        ]
+
+        if self.collection_name not in existing:
+            print("Creating Qdrant collection...")
+
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=768,
+                    distance=Distance.COSINE
+                )
+            )
+
+        self.db = QdrantVectorStore(
+            client=self.client,
+            collection_name=self.collection_name,
+            embedding=self.embeddings
+        )
+
+        if self.client.count(self.collection_name).count == 0:
+            print("Uploading documents to Qdrant...")
+            self.db.add_documents(documents)
+
+        print("Building BM25 index...")
         self.corpus = [self._tokenize(d.page_content) for d in documents]
         self.bm25 = BM25Okapi(self.corpus)
 
@@ -78,12 +106,12 @@ class HybridRetriever(BaseRetriever):
 
     def retrieve(self, query: str, k: int = 3):
 
-        dense = self.db.similarity_search_with_score(
-            "query: " + query,
+        dense_docs = self.db.similarity_search_with_score(
+            query,
             k=min(40, len(self.documents))
         )
 
-        dense_scores = {d.page_content: s for d, s in dense}
+        dense_scores = {d.page_content: s for d, s in dense_docs}
 
         tokenized = self._tokenize(query)
         bm25_scores_arr = self.bm25.get_scores(tokenized)
@@ -92,15 +120,17 @@ class HybridRetriever(BaseRetriever):
             self.documents[i].page_content: bm25_scores_arr[i]
             for i in range(len(self.documents))
         }
+
         dense_n = self._normalize(dense_scores)
         bm25_n = self._normalize(bm25_scores)
 
         combined = {}
+
         for doc in self.documents:
             c = doc.page_content
             combined[c] = (
-                self.alpha * dense_n.get(c, 0)
-                + (1 - self.alpha) * bm25_n.get(c, 0)
+                self.alpha * dense_n.get(c, 0) +
+                (1 - self.alpha) * bm25_n.get(c, 0)
             )
 
         ranked = sorted(
@@ -108,6 +138,7 @@ class HybridRetriever(BaseRetriever):
             key=lambda d: combined.get(d.page_content, 0),
             reverse=True
         )
+
         seen = set()
         filtered = []
 
@@ -118,8 +149,13 @@ class HybridRetriever(BaseRetriever):
                 filtered.append(d)
 
         top = filtered[:25]
+
         if self.reranker:
-            top = self.reranker.rerank(query, top, top_k=max(k, 6))
+            top = self.reranker.rerank(
+                query,
+                top,
+                top_k=max(k, 6)
+            )
 
         return top[:k]
 
@@ -200,7 +236,7 @@ class ClassicRAG:
         self.retriever = HybridRetriever(self.chunks, reranker=self.reranker)
         self.generator = Generator()
 
-    def parse_markdown_with_metadata(self, text: str):
+    def _parse_markdown_with_metadata(self, text: str):
         if text.startswith("---"):
             parts = text.split("---", 2)
 
@@ -236,7 +272,7 @@ class ClassicRAG:
             except Exception:
                 continue
 
-            meta, content = self.parse_markdown_with_metadata(raw)
+            meta, content = self._parse_markdown_with_metadata(raw)
 
             meta.update({
                 "source": str(file_path),
