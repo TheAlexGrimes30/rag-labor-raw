@@ -166,7 +166,7 @@ class Generator:
         print("Loading LLM...")
 
         base_dir = Path(__file__).resolve().parent.parent.parent
-        model_path = base_dir / "models" / "Phi-3-mini-4k-instruct-q4.gguf"
+        model_path = base_dir / "models" / "Qwen3-8B-Q4_K_M.gguf"
 
         self.llm = Llama(
             model_path=str(model_path),
