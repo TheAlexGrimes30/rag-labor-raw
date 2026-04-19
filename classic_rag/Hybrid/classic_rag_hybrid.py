@@ -6,6 +6,7 @@ from typing import List, Dict
 
 import yaml
 from llama_cpp import Llama
+from nltk import SnowballStemmer
 from rank_bm25 import BM25Okapi
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -67,14 +68,16 @@ class Reranker:
         return [d for _, d in ranked[:top_k]]
 
 
-class HybridRetriever(BaseRetriever):
+class HybridRetriever:
 
-    def __init__(self, documents: List[Document], alpha: float = 0.7, reranker: Reranker = None):
+    def __init__(self, documents: List[Document], alpha: float = 0.6, reranker=None):
         print("Initializing HybridRetriever...")
 
         self.documents = documents
         self.alpha = alpha
         self.reranker = reranker
+
+        self.stemmer = SnowballStemmer("russian")
 
         self.embeddings = HuggingFaceEmbeddings(
             model_name="intfloat/multilingual-e5-base"
@@ -83,13 +86,10 @@ class HybridRetriever(BaseRetriever):
         self.client = QdrantClient(host="localhost", port=6333)
         self.collection_name = "labor_law"
 
-        existing = [
-            c.name for c in self.client.get_collections().collections
-        ]
+        existing = [c.name for c in self.client.get_collections().collections]
 
         if self.collection_name not in existing:
             print("Creating Qdrant collection...")
-
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
@@ -105,44 +105,53 @@ class HybridRetriever(BaseRetriever):
         )
 
         if self.client.count(self.collection_name).count == 0:
-            print("Uploading documents to Qdrant...")
+            print("Uploading documents...")
             self.db.add_documents(documents)
-
-        print("Building BM25 index...")
-        self.corpus = [self._tokenize(d.page_content) for d in documents]
-        self.bm25 = BM25Okapi(self.corpus)
 
     def _tokenize(self, text: str):
         text = text.lower()
         text = re.sub(r"[^\w\s]", " ", text)
-        return text.split()
+        tokens = text.split()
+        return [self.stemmer.stem(t) for t in tokens]
 
     def _normalize(self, scores: dict):
-        vals = list(scores.values())
-        if not vals:
+        if not scores:
             return scores
 
+        vals = list(scores.values())
         mn, mx = min(vals), max(vals)
+
         if abs(mx - mn) < 1e-8:
             return {k: 0 for k in scores}
 
         return {k: (v - mn) / (mx - mn) for k, v in scores.items()}
 
-    def retrieve(self, query: str, k: int = 3):
+    def retrieve(self, query: str, k: int = 5):
 
-        dense_docs = self.db.similarity_search_with_score(
+        dense_results = self.db.similarity_search_with_score(
             query,
-            k=min(40, len(self.documents))
+            k=min(50, len(self.documents))
         )
 
-        dense_scores = {d.page_content: s for d, s in dense_docs}
+        if not dense_results:
+            return []
 
-        tokenized = self._tokenize(query)
-        bm25_scores_arr = self.bm25.get_scores(tokenized)
+        candidate_docs = [d for d, _ in dense_results]
+        dense_scores = {d.page_content: s for d, s in dense_results}
+
+        tokenized_query = self._tokenize(query)
+
+        corpus = [
+            self._tokenize(d.page_content)
+            for d in candidate_docs
+        ]
+
+        bm25 = BM25Okapi(corpus)
+        bm25_scores_arr = bm25.get_scores(tokenized_query)
 
         bm25_scores = {
-            self.documents[i].page_content: bm25_scores_arr[i]
-            for i in range(len(self.documents))
+            candidate_docs[i].page_content: bm25_scores_arr[i]
+            for i in range(len(candidate_docs))
         }
 
         dense_n = self._normalize(dense_scores)
@@ -150,15 +159,15 @@ class HybridRetriever(BaseRetriever):
 
         combined = {}
 
-        for doc in self.documents:
-            c = doc.page_content
+        for d in candidate_docs:
+            c = d.page_content
             combined[c] = (
                 self.alpha * dense_n.get(c, 0) +
                 (1 - self.alpha) * bm25_n.get(c, 0)
             )
 
         ranked = sorted(
-            self.documents,
+            candidate_docs,
             key=lambda d: combined.get(d.page_content, 0),
             reverse=True
         )
@@ -172,7 +181,7 @@ class HybridRetriever(BaseRetriever):
                 seen.add(key)
                 filtered.append(d)
 
-        top = filtered[:25]
+        top = filtered[:12]
 
         if self.reranker:
             top = self.reranker.rerank(
@@ -182,7 +191,6 @@ class HybridRetriever(BaseRetriever):
             )
 
         return top[:k]
-
 
 class Generator:
 
@@ -196,9 +204,9 @@ class Generator:
             model_path=str(model_path),
             n_ctx=4096,
             n_threads=8,
-            temperature=0.25,
-            top_p=0.9,
-            repeat_penalty=1.15,
+            temperature=0.1,
+            top_p=0.85,
+            repeat_penalty=1.2,
         )
 
     def clean_context(self, text: str):
@@ -209,41 +217,59 @@ class Generator:
     def build_prompt(self, query: str, context: str):
 
         return f"""
-        Ты — юридический помощник по трудовому праву Российской Федерации.
+        Ты — юридический ассистент по трудовому праву РФ.
         
-        ЗАДАЧА:
-        Ответь на вопрос пользователя строго на основе контекста.
+        === ЗАДАЧА ===
+        Сформируй короткий юридически точный ответ.
         
-        ПРАВИЛА:
-        - Используй контекст в первую очередь
-        - Если в контексте нет точного ответа — скажи:
-          "В предоставленном контексте нет точного ответа"
-        - НЕ выдумывай статьи, номера законов и нормы
-        - Если контекст неполный — дай общий юридически корректный ответ БЕЗ ссылок на статьи
-        - Ответ должен быть кратким (3–6 предложений)
-        - Пиши на русском языке
+        === ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО) ===
+        1 строка — "Да/Нет/Краткий ответ"
+        2 строка — пояснение
+        3 строка — ссылка на ТК РФ (если есть)
         
-        КОНТЕКСТ:
+        === ПРАВИЛА ===
+        - НЕ пиши "НЕТ ОТВЕТА"
+        - ВСЕГДА пытайся ответить по контексту
+        - Если информации мало — дай общий юридически корректный ответ
+        - НЕ рассуждай
+        - НЕ повторяй вопрос
+        - Убери лишние пробелы и переносы
+        
+        === ПРИМЕР ===
+        Можно ли работать с 14 лет?
+        Да. Можно. В соответствии со статьёй 63 ТК РФ. Несовершеннолетние с 14 лет могут работать с согласия родителей и органов опеки в свободное от учёбы время.
+        
+        === КОНТЕКСТ ===
         {context}
         
-        ВОПРОС:
+        === ВОПРОС ===
         {query}
         
-        ОТВЕТ:
+        === ОТВЕТ ===
         """.strip()
 
     def generate(self, query: str, context: str):
 
         context = self.clean_context(context)
+
+        if not context:
+            return "Нет данных в источнике."
+
         prompt = self.build_prompt(query, context)
 
         output = self.llm(
             prompt,
-            max_tokens=250,
-            stop=["ВОПРОС:", "КОНТЕКСТ:", "ОТВЕТ:"]
+            max_tokens=220,
+            temperature=0.1,
+            stop=["=== ВОПРОС ===", "=== КОНТЕКСТ ==="]
         )
 
-        return output["choices"][0]["text"].strip()
+        answer = output["choices"][0]["text"].strip()
+        answer = re.sub(r"\n{2,}", "\n", answer)
+        answer = answer.strip()
+
+        return answer
+
 
 
 
