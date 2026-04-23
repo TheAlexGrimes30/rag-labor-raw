@@ -152,7 +152,7 @@ class BM25Mapper:
         payload: dict[str, Any] | None = None
     ) -> SearchResult:
         return SearchResult(
-            text=text,
+            text=text or "",
             score=float(score),
             payload=payload or {},
             source="bm25",
@@ -170,5 +170,5 @@ class RerankMapper:
             score=float(score),
             payload=base.payload.copy(),
             id=base.id,
-            source=f"{base.source}+reranker",
+            source=f"{base.source}+reranker" if base.source else "reranker",
         )

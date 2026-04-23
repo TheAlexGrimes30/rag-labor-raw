@@ -5,6 +5,12 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import List, Optional
 
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_qdrant import QdrantVectorStore
+from nltk import SnowballStemmer
+from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance, VectorParams
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
@@ -129,7 +135,7 @@ class Embedder:
 
     def __post_init__(self):
         self._model = self._load_model(self.model_name)
-        self.dim = self._model.get_embedding_dimension()
+        self.dim = self._model.get_sentence_embedding_dimension()
 
     @staticmethod
     @lru_cache(maxsize=2)
@@ -156,7 +162,7 @@ class Embedder:
         Returns:
             List[List[float]]: Список векторов
         """
-
+        print("QUERY:", texts[:1])
         return self._encode(self._apply_prefix(texts, is_query=True))
 
     def encode_passages(self, texts: List[str]) -> List[List[float]]:
@@ -170,6 +176,7 @@ class Embedder:
             List[List[float]]: Список векторов
         """
 
+        print("PASSAGE:", texts[:1])
         return self._encode(self._apply_prefix(texts, is_query=False))
 
     def encode(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
@@ -364,6 +371,9 @@ class AlphaFusion(BaseFusion):
         if not dense:
             return []
 
+        if len(sparse_scores) < len(dense):
+            sparse_scores = sparse_scores + [0.0] * (len(dense) - len(sparse_scores))
+
         dense_scores = self._minmax([d.score for d in dense])
 
         fused = []
@@ -375,7 +385,7 @@ class AlphaFusion(BaseFusion):
             if score < self.min_score:
                 continue
 
-            key = hashlib.md5(doc.text.encode()).hexdigest()
+            key = hashlib.md5((doc.text or "").encode()).hexdigest()
 
             if key in seen:
                 continue
@@ -440,6 +450,35 @@ class Retriever:
         self.sparse = sparse or BM25Retriever()
         self.fusion = fusion or AlphaFusion()
 
+        self._corpus: List[str] = []
+        self._is_built = False
+
+    def build_corpus(self):
+        """
+        Забираем ВСЕ документы из Qdrant payload'ов
+        и строим BM25 индекс.
+        """
+
+        if self._is_built:
+            return
+
+        points, _ = self.vector_store.client.scroll(
+            collection_name=self.vector_store.collection_name,
+            limit=10000,
+            with_payload=True,
+            with_vectors=False
+        )
+
+        self._corpus = [
+            (p.payload or {}).get("text", "").strip()
+            for p in points
+        ]
+
+        self._corpus = [t for t in self._corpus if t]
+
+        self.sparse.build(self._corpus)
+        self._is_built = True
+
     def retrieve(self, query: str, top_k: int = 10) -> List[SearchResult]:
         """
         Выполнить гибридный поиск.
@@ -459,18 +498,158 @@ class Retriever:
             List[SearchResult]: Итоговые документы
         """
 
-        query_vec = self.embedder.encode_queries([query])[0]
+        self.build_corpus()
 
+        query_vec = self.embedder.encode_queries([query or ""])[0]
         dense_hits = self.dense.search(query_vec, k=top_k * 5)
 
         if not dense_hits:
             return []
 
-        corpus = [d.text for d in dense_hits]
+        sparse_scores = self.sparse.search(
+            query or "",
+            self._corpus,
+            k=len(self._corpus)
+        )
 
-        sparse_scores = self.sparse.search(query, corpus, k=len(corpus))
+        sparse_map = {
+            self._corpus[i]: sparse_scores[i]
+            for i in range(len(self._corpus))
+        }
 
-        fused = self.fusion.fuse(dense_hits, sparse_scores)
+        aligned_sparse = [
+            sparse_map.get((d.text or "").strip(), 0.0)
+            for d in dense_hits
+        ]
 
-        return fused[:top_k]
-    
+        fused = self.fusion.fuse(dense_hits, aligned_sparse)
+
+        return [
+                   f for f in fused
+                   if f.text and len(f.text.strip()) > 20
+               ][:top_k]
+
+
+class HybridRetriever:
+
+    def __init__(self, documents: List[Document], alpha: float = 0.6, reranker=None):
+        print("Initializing HybridRetriever...")
+
+        self.documents = documents
+        self.alpha = alpha
+        self.reranker = reranker
+
+        self.stemmer = SnowballStemmer("russian")
+
+        self.embeddings = HuggingFaceEmbeddings(
+            model_name="intfloat/multilingual-e5-base"
+        )
+
+        self.client = QdrantClient(host="localhost", port=6333)
+        self.collection_name = "labor_law"
+
+        existing = [c.name for c in self.client.get_collections().collections]
+
+        if self.collection_name not in existing:
+            print("Creating Qdrant collection...")
+            self.client.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=768,
+                    distance=Distance.COSINE
+                )
+            )
+
+        self.db = QdrantVectorStore(
+            client=self.client,
+            collection_name=self.collection_name,
+            embedding=self.embeddings
+        )
+
+        if self.client.count(self.collection_name).count == 0:
+            print("Uploading documents...")
+            self.db.add_documents(documents)
+
+    def _tokenize(self, text: str):
+        text = text.lower()
+        text = re.sub(r"[^\w\s]", " ", text)
+        tokens = text.split()
+        return [self.stemmer.stem(t) for t in tokens]
+
+    def _normalize(self, scores: dict):
+        if not scores:
+            return scores
+
+        vals = list(scores.values())
+        mn, mx = min(vals), max(vals)
+
+        if abs(mx - mn) < 1e-8:
+            return {k: 0 for k in scores}
+
+        return {k: (v - mn) / (mx - mn) for k, v in scores.items()}
+
+    def retrieve(self, query: str, k: int = 5):
+
+        dense_results = self.db.similarity_search_with_score(
+            query,
+            k=min(50, len(self.documents))
+        )
+
+        if not dense_results:
+            return []
+
+        candidate_docs = [d for d, _ in dense_results]
+        dense_scores = {d.page_content: s for d, s in dense_results}
+
+        tokenized_query = self._tokenize(query)
+
+        corpus = [
+            self._tokenize(d.page_content)
+            for d in candidate_docs
+        ]
+
+        bm25 = BM25Okapi(corpus)
+        bm25_scores_arr = bm25.get_scores(tokenized_query)
+
+        bm25_scores = {
+            candidate_docs[i].page_content: bm25_scores_arr[i]
+            for i in range(len(candidate_docs))
+        }
+
+        dense_n = self._normalize(dense_scores)
+        bm25_n = self._normalize(bm25_scores)
+
+        combined = {}
+
+        for d in candidate_docs:
+            c = d.page_content
+            combined[c] = (
+                self.alpha * dense_n.get(c, 0) +
+                (1 - self.alpha) * bm25_n.get(c, 0)
+            )
+
+        ranked = sorted(
+            candidate_docs,
+            key=lambda d: combined.get(d.page_content, 0),
+            reverse=True
+        )
+
+        seen = set()
+        filtered = []
+
+        for d in ranked:
+            key = d.metadata.get("id") or d.metadata.get("source")
+            if key not in seen:
+                seen.add(key)
+                filtered.append(d)
+
+        top = filtered[:12]
+
+        if self.reranker:
+            top = self.reranker.rerank(
+                query,
+                top,
+                top_k=max(k, 6)
+            )
+
+        return top[:k]

@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from functools import lru_cache
 from typing import List, Tuple
 
@@ -5,9 +6,9 @@ from sentence_transformers import CrossEncoder
 
 from classic_rag.Hybrid.rag_config import SearchResult
 
-RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+class BaseReranker(ABC):
 
-class BaseReranker:
+    @abstractmethod
     def rerank(
         self,
         query: str,
@@ -22,10 +23,9 @@ class Reranker(BaseReranker):
 
     def __init__(
         self,
-        model_name: str = RERANK_MODEL,
+        model_name: str = "cross-encoder/ms-marco-MiniLM-L-12-v2",
         batch_size: int = 32,
     ):
-        self.model_name = model_name
         self.batch_size = batch_size
         self._model = self._get_model(model_name)
 

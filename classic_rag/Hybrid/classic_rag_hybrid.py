@@ -1,9 +1,11 @@
 import re
 from pathlib import Path
+from typing import List
+
 import yaml
 from langchain_core.documents import Document
 from classic_rag.Hybrid.generator import Generator
-from classic_rag.Hybrid.rag_config import RAGResponse
+from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
 from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import HybridRetriever
 
@@ -18,7 +20,9 @@ class ClassicRAG:
         self.chunks = self.chunk_documents(self.documents)
 
         self.reranker = Reranker()
-        self.retriever = HybridRetriever(self.chunks, reranker=self.reranker)
+
+        self.retriever = HybridRetriever(self.chunks)
+
         self.generator = Generator()
 
     def _parse_markdown_with_metadata(self, text: str):
@@ -44,9 +48,7 @@ class ClassicRAG:
 
     def load_documents(self):
         base_path = Path(__file__).resolve()
-
         project_root = base_path.parents[2]
-
         rag_db_path = project_root / "rag_db"
 
         docs = []
@@ -79,7 +81,6 @@ class ClassicRAG:
 
         for d in docs:
             text = re.sub(r"\n{3,}", "\n\n", d.page_content).strip()
-
             sentences = re.split(r"(?<=[.!?])\s+", text)
 
             current = []
@@ -116,33 +117,61 @@ class ClassicRAG:
         print(f"Total chunks: {len(chunks)}")
         return chunks
 
-    def retrieve(self, query):
-        return self.retriever.retrieve(query, k=3)
+    def retrieve(self, query: str) -> List[SearchResult]:
 
-    def build_context(self, docs):
+        docs = self.retriever.retrieve(query, k=10)
+
+        results = [
+            SearchResult(
+                text=d.page_content,
+                score=0.0,
+                payload=d.metadata,
+                source="retriever"
+            )
+            for d in docs
+        ]
+
+        return results
+
+    def rerank(self, query: str, hits: List[SearchResult]) -> List[SearchResult]:
+        return self.reranker.rerank(query, hits, top_n=5)
+
+    def build_context(self, hits: List[SearchResult]) -> str:
         parts = []
 
-        for d in docs:
-            src = d.metadata.get("file", "unknown")
+        for h in hits:
+            src = h.payload.get("file", "unknown")
 
-            if len(d.page_content) < 100:
+            if len(h.text) < 100:
                 continue
 
-            parts.append(f"[SOURCE: {src}]\n{d.page_content}")
+            parts.append(f"[SOURCE: {src}]\n{h.text}")
 
         return "\n\n---\n\n".join(parts)[:4500]
 
     def ask(self, query: str) -> RAGResponse:
 
-        docs = self.retrieve(query)
-        context = self.build_context(docs)
+        hits = self.retrieve(query)
+
+        print("\n--- RETRIEVER RESULTS ---")
+        for h in hits[:5]:
+            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
+
+        reranked = self.rerank(query, hits)
+
+        print("\n--- RERANKED RESULTS ---")
+        for h in reranked:
+            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
+
+        context = self.build_context(reranked)
 
         answer = self.generator.generate(query, context)
 
         return RAGResponse(
             answer=answer,
-            sources=[d.metadata for d in docs]
+            sources=[h.payload for h in reranked]
         )
+
 
 if __name__ == "__main__":
 

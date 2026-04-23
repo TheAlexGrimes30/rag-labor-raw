@@ -67,10 +67,22 @@ class VectorStore:
             None
         """
 
-        points = [
-            PointStruct(id=i, vector=v, payload=p)
-            for i, v, p in zip(ids, vectors, payloads, strict=True)
-        ]
+        points: List[PointStruct] = []
+
+        for i, v, p in zip(ids, vectors, payloads, strict=True):
+
+            safe_payload = dict(p) if p else {}
+
+            if "text" not in safe_payload:
+                safe_payload["text"] = ""
+
+            points.append(
+                PointStruct(
+                    id=str(i),
+                    vector=v,
+                    payload=safe_payload,
+                )
+            )
 
         self.client.upsert(
             collection_name=self.collection_name,
@@ -119,7 +131,10 @@ class VectorStore:
             query_filter=query_filter,
         )
 
-        return list(result.points)
+        if not result or not result.points:
+            return []
+
+        return result.points
 
     def delete_collection(self) -> None:
         """
