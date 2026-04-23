@@ -30,16 +30,15 @@ class Chunk:
     chunk_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.chunk_id is None:
-            self.chunk_id = str(
-                uuid.uuid5(
-                    uuid.NAMESPACE_URL,
-                    self.payload.get("idempotency_key", self.text[:512]),
-                )
-            )
-
         if self.payload is None:
             self.payload = {}
+
+        if self.chunk_id is None:
+            key = self.payload.get("idempotency_key") or self.text[:512]
+
+            self.chunk_id = str(
+                uuid.uuid5(uuid.NAMESPACE_URL, key)
+            )
 
 
 @dataclass
@@ -71,11 +70,10 @@ class SearchResult:
     source: str | None = None
 
     def __post_init__(self) -> None:
-        self.text = (self.text or "").strip()
-
         if self.payload is None:
             self.payload = {}
 
+        self.text = (self.text or "").strip()
         self.payload.setdefault("text", self.text)
 
     @classmethod
@@ -90,15 +88,7 @@ class SearchResult:
             SearchResult: Унифицированный результат
         """
 
-        payload = getattr(point, "payload", {}) or {}
-
-        return cls(
-            text=str(payload.get("text", "")).strip(),
-            score=float(getattr(point, "score", 0.0)),
-            payload=payload,
-            id=str(getattr(point, "id", None)),
-            source="qdrant",
-        )
+        return QdrantMapper.map(point)
 
     @classmethod
     def from_bm25(cls, text: str, score: float, payload: dict[str, Any] | None = None) -> "SearchResult":
@@ -114,12 +104,7 @@ class SearchResult:
             SearchResult: Унифицированный результат
         """
 
-        return cls(
-            text=text,
-            score=float(score),
-            payload=payload or {},
-            source="bm25",
-        )
+        return BM25Mapper.map(text, score, payload)
 
     @classmethod
     def from_rerank(cls, base: "SearchResult", score: float) -> "SearchResult":
@@ -134,10 +119,56 @@ class SearchResult:
             SearchResult: Обновлённый результат
         """
 
-        return cls(
+        return RerankMapper.map(base, score)
+
+class QdrantMapper:
+    """
+    Преобразует результат Qdrant → SearchResult
+    """
+
+    @staticmethod
+    def map(point) -> SearchResult:
+        payload = getattr(point, "payload", {}) or {}
+        raw_id = getattr(point, "id", None)
+
+        return SearchResult(
+            text=str(payload.get("text", "")),
+            score=float(getattr(point, "score", 0.0)),
+            payload=payload,
+            id=str(raw_id) if raw_id is not None else None,
+            source="qdrant",
+        )
+
+
+class BM25Mapper:
+    """
+    Преобразует результат BM25 → SearchResult
+    """
+
+    @staticmethod
+    def map(
+        text: str,
+        score: float,
+        payload: dict[str, Any] | None = None
+    ) -> SearchResult:
+        return SearchResult(
+            text=text,
+            score=float(score),
+            payload=payload or {},
+            source="bm25",
+        )
+
+class RerankMapper:
+    """
+    Преобразует результат после reranking
+    """
+
+    @staticmethod
+    def map(base: SearchResult, score: float) -> SearchResult:
+        return SearchResult(
             text=base.text,
             score=float(score),
-            payload=base.payload,
+            payload=base.payload.copy(),
             id=base.id,
-            source="reranker",
+            source=f"{base.source}+reranker",
         )
