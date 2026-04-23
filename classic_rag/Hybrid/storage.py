@@ -132,4 +132,3 @@ class VectorStore:
 
         if self.client.collection_exists(self.collection_name):
             self.client.delete_collection(self.collection_name)
-            

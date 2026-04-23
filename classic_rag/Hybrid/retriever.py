@@ -1,142 +1,476 @@
+import hashlib
 import re
 from abc import abstractmethod, ABC
-from typing import List
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import List, Optional
 
-from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_qdrant import QdrantVectorStore
-from nltk import SnowballStemmer
-from qdrant_client import QdrantClient
-from qdrant_client.http.models import Distance, VectorParams
 from rank_bm25 import BM25Okapi
+from sentence_transformers import SentenceTransformer
 
+from classic_rag.Hybrid.rag_config import SearchResult
+from classic_rag.Hybrid.storage import VectorStore
+
+
+class BaseDenseRetriever(ABC):
+    """
+    Абстрактный интерфейс для dense retrieval (векторный поиск).
+
+    Используется для:
+    - поиска по эмбеддингам
+    - работы с векторными БД (Qdrant, FAISS и т.д.)
+    """
+
+    @abstractmethod
+    def search(self, query_vec: List[float], k: int) -> List[SearchResult]:
+        """
+        Выполнить поиск по вектору запроса.
+
+        Args:
+            query_vec (List[float]): Вектор запроса
+            k (int): Количество возвращаемых результатов
+
+        Returns:
+            List[SearchResult]: Список найденных документов
+        """
+
+        raise NotImplementedError
+
+class BaseSparseRetriever(ABC):
+    """
+    Абстрактный интерфейс для sparse retrieval (лексический поиск).
+    """
+
+    @abstractmethod
+    def search(self, query: str, corpus: List[str], k: int) -> List[float]:
+        """
+        Выполнить лексический поиск.
+
+        Args:
+            query (str): Текст запроса
+            corpus (List[str]): Список документов (тексты)
+            k (int): Количество документов (используется для совместимости)
+
+        Returns:
+            List[float]: Список score для каждого документа корпуса
+        """
+
+        raise NotImplementedError
 
 class BaseRetriever(ABC):
+    """
+    Абстрактный интерфейс для полного retriever.
+
+    Объединяет:
+    - dense retrieval
+    - sparse retrieval
+    - fusion
+    """
+
     @abstractmethod
-    def retrieve(self, query: str, k: int = 3) -> List[Document]:
-        pass
+    def retrieve(self, query: str, k: int = 3) -> List[SearchResult]:
+        """
+        Выполнить поиск документов по запросу.
 
+        Args:
+            query (str): Запрос пользователя
+            k (int): Количество результатов
 
-class HybridRetriever:
+        Returns:
+            List[SearchResult]: Список релевантных документов
+        """
 
-    def __init__(self, documents: List[Document], alpha: float = 0.6, reranker=None):
-        print("Initializing HybridRetriever...")
+        raise NotImplementedError
 
-        self.documents = documents
-        self.alpha = alpha
-        self.reranker = reranker
+class BaseFusion(ABC):
+    """
+    Абстрактный интерфейс для объединения (fusion) результатов.
+    """
 
-        self.stemmer = SnowballStemmer("russian")
+    @abstractmethod
+    def fuse(
+        self,
+        dense: List[SearchResult],
+        sparse_scores: List[float],
+    ) -> List[SearchResult]:
+        """
+        Объединить dense и sparse результаты.
 
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="intfloat/multilingual-e5-base"
+        Args:
+            dense (List[SearchResult]): Результаты dense поиска
+            sparse_scores (List[float]): Оценки BM25 для тех же документов
+
+        Returns:
+            List[SearchResult]: Итоговый список документов
+        """
+
+        raise NotImplementedError
+
+@dataclass
+class Embedder:
+    """
+    Единый слой эмбеддингов.
+
+    Отвечает за:
+    - загрузку модели SentenceTransformer
+    - добавление префиксов (E5: query:/passage:)
+    - batch encoding
+    - нормализацию векторов
+
+    Attributes:
+        model_name (str): Название модели эмбеддингов
+        batch_size (int): Размер батча
+        normalize (bool): Нормализовать ли вектора
+    """
+
+    model_name: str
+    batch_size: int = 16
+    normalize: bool = True
+
+    def __post_init__(self):
+        self._model = self._load_model(self.model_name)
+        self.dim = self._model.get_embedding_dimension()
+
+    @staticmethod
+    @lru_cache(maxsize=2)
+    def _load_model(model_name: str) -> SentenceTransformer:
+        """
+        Загрузка модели с кешированием.
+
+        Args:
+            model_name (str): Название модели
+
+        Returns:
+            SentenceTransformer: Загруженная модель
+        """
+
+        return SentenceTransformer(model_name)
+
+    def encode_queries(self, texts: List[str]) -> List[List[float]]:
+        """
+        Закодировать список запросов.
+
+        Args:
+            texts (List[str]): Список текстов
+
+        Returns:
+            List[List[float]]: Список векторов
+        """
+
+        return self._encode(self._apply_prefix(texts, is_query=True))
+
+    def encode_passages(self, texts: List[str]) -> List[List[float]]:
+        """
+        Закодировать документы (passages).
+
+        Args:
+            texts (List[str]): Список текстов
+
+        Returns:
+            List[List[float]]: Список векторов
+        """
+
+        return self._encode(self._apply_prefix(texts, is_query=False))
+
+    def encode(self, texts: List[str], is_query: bool = False) -> List[List[float]]:
+        """
+        Универсальный encode метод.
+
+        Args:
+            texts (List[str]): Тексты
+            is_query (bool): Является ли текст запросом
+
+        Returns:
+            List[List[float]]: Вектора
+        """
+
+        return self._encode(self._apply_prefix(texts, is_query))
+
+    def _apply_prefix(self, texts: List[str], is_query: bool) -> List[str]:
+        """
+        Добавление E5-префиксов.
+
+        Args:
+            texts (List[str]): Тексты
+            is_query (bool): Тип текста
+
+        Returns:
+            List[str]: Префиксированные тексты
+        """
+
+        if "e5" in self.model_name.lower():
+            prefix = "query: " if is_query else "passage: "
+            return [prefix + t for t in texts]
+        return texts
+
+    def _encode(self, texts: List[str]) -> List[List[float]]:
+        """
+        Преобразование текста в вектора.
+
+        Args:
+            texts (List[str]): Список текстов
+
+        Returns:
+            List[List[float]]: Список векторов
+        """
+
+        vectors = self._model.encode(
+            texts,
+            batch_size=self.batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=self.normalize,
+            show_progress_bar=True,
         )
+        return vectors.tolist()
 
-        self.client = QdrantClient(host="localhost", port=6333)
-        self.collection_name = "labor_law"
 
-        existing = [c.name for c in self.client.get_collections().collections]
+class BM25Retriever(BaseSparseRetriever):
+    """
+    Реализация sparse retrieval через BM25.
 
-        if self.collection_name not in existing:
-            print("Creating Qdrant collection...")
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=768,
-                    distance=Distance.COSINE
+    Attributes:
+        _bm25 (Optional[BM25Okapi]): Модель BM25
+        _corpus (Optional[List[str]]): Текущий корпус
+    """
+
+    def __init__(self):
+        self._bm25: Optional[BM25Okapi] = None
+        self._corpus: Optional[List[str]] = None
+
+    def build(self, corpus: List[str]) -> None:
+        """
+        Построение BM25 индекса.
+
+        Args:
+            corpus (List[str]): Список документов
+        """
+
+        tokenized = [self._tokenize(t) for t in corpus]
+        self._bm25 = BM25Okapi(tokenized)
+        self._corpus = corpus
+
+    def search(self, query: str, corpus: List[str], k: int) -> List[float]:
+        """
+        Получить BM25 оценки для документов.
+
+        Args:
+            query (str): Запрос
+            corpus (List[str]): Документы
+            k (int): Не используется (для совместимости)
+
+        Returns:
+            List[float]: Нормализованные оценки
+        """
+
+        if self._bm25 is None or self._corpus != corpus:
+            self.build(corpus)
+
+        tokens = self._tokenize(query)
+        scores = self._bm25.get_scores(tokens)
+
+        return self._minmax(scores)
+
+    def _tokenize(self, text: str) -> List[str]:
+        """
+        Токенизация текста.
+
+        Args:
+            text (str): Входной текст
+
+        Returns:
+            List[str]: Список токенов
+        """
+
+        text = text.lower()
+        text = re.sub(r"[^\w\s]", " ", text)
+        return text.split()
+
+    def _minmax(self, values: List[float]) -> List[float]:
+        """
+        Min-max нормализация.
+
+        Args:
+            values (List[float]): Список значений
+
+        Returns:
+            List[float]: Нормализованные значения
+        """
+
+        mn, mx = min(values), max(values)
+        if abs(mx - mn) < 1e-8:
+            return [0.0] * len(values)
+        return [(v - mn) / (mx - mn) for v in values]
+
+class QdrantDenseRetriever(BaseDenseRetriever):
+    """
+    Dense retriever на основе Qdrant.
+
+    Attributes:
+        vector_store (VectorStore): Векторное хранилище
+    """
+
+    def __init__(self, vector_store: VectorStore):
+        self.vector_store = vector_store
+
+    def search(self, query_vec: List[float], k: int) -> List[SearchResult]:
+        """
+        Поиск ближайших векторов.
+
+        Args:
+            query_vec (List[float]): Вектор запроса
+            k (int): Количество результатов
+
+        Returns:
+            List[SearchResult]: Результаты поиска
+        """
+
+        hits = self.vector_store.search(query_vec, limit=k)
+
+        results = []
+        for h in hits:
+            sr = SearchResult.from_qdrant(h)
+            if sr.text:
+                results.append(sr)
+
+        return results
+
+class AlphaFusion(BaseFusion):
+    """
+    Простая линейная комбинация dense + sparse.
+
+    score = alpha * dense + (1 - alpha) * sparse
+    """
+
+    def __init__(self, alpha: float = 0.7, min_score: float = 0.05):
+        self.alpha = alpha
+        self.min_score = min_score
+
+    def fuse(
+        self,
+        dense: List[SearchResult],
+        sparse_scores: List[float],
+    ) -> List[SearchResult]:
+        """
+        Объединение результатов.
+
+        Args:
+            dense (List[SearchResult]): Dense результаты
+            sparse_scores (List[float]): BM25 оценки
+
+        Returns:
+            List[SearchResult]: Отсортированный список
+        """
+
+        if not dense:
+            return []
+
+        dense_scores = self._minmax([d.score for d in dense])
+
+        fused = []
+        seen = set()
+
+        for i, doc in enumerate(dense):
+            score = self.alpha * dense_scores[i] + (1 - self.alpha) * sparse_scores[i]
+
+            if score < self.min_score:
+                continue
+
+            key = hashlib.md5(doc.text.encode()).hexdigest()
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            fused.append(
+                SearchResult(
+                    text=doc.text,
+                    score=score,
+                    payload=doc.payload,
+                    id=doc.id,
+                    source=doc.source,
                 )
             )
 
-        self.db = QdrantVectorStore(
-            client=self.client,
-            collection_name=self.collection_name,
-            embedding=self.embeddings
-        )
+        return sorted(fused, key=lambda x: x.score, reverse=True)
 
-        if self.client.count(self.collection_name).count == 0:
-            print("Uploading documents...")
-            self.db.add_documents(documents)
+    def _minmax(self, values: List[float]) -> List[float]:
+        """
+        Нормализация значений.
 
-    def _tokenize(self, text: str):
-        text = text.lower()
-        text = re.sub(r"[^\w\s]", " ", text)
-        tokens = text.split()
-        return [self.stemmer.stem(t) for t in tokens]
+        Args:
+            values (List[float]): Значения
 
-    def _normalize(self, scores: dict):
-        if not scores:
-            return scores
+        Returns:
+            List[float]: Нормализованные значения
+        """
 
-        vals = list(scores.values())
-        mn, mx = min(vals), max(vals)
-
+        mn, mx = min(values), max(values)
         if abs(mx - mn) < 1e-8:
-            return {k: 0 for k in scores}
+            return [0.0] * len(values)
+        return [(v - mn) / (mx - mn) for v in values]
 
-        return {k: (v - mn) / (mx - mn) for k, v in scores.items()}
+class Retriever:
+    """
+    Гибридный retriever:
+    - Dense (Qdrant)
+    - Sparse (BM25)
+    - Fusion (Alpha)
 
-    def retrieve(self, query: str, k: int = 5):
+    Attributes:
+        vector_store (VectorStore)
+        embedder (Embedder)
+        dense (BaseDenseRetriever)
+        sparse (BaseSparseRetriever)
+        fusion (BaseFusion)
+    """
 
-        dense_results = self.db.similarity_search_with_score(
-            query,
-            k=min(50, len(self.documents))
-        )
+    def __init__(
+        self,
+        vector_store: VectorStore,
+        embedder: Embedder,
+        dense: BaseDenseRetriever | None = None,
+        sparse: BaseSparseRetriever | None = None,
+        fusion: BaseFusion | None = None,
+    ):
+        self.vector_store = vector_store
+        self.embedder = embedder
 
-        if not dense_results:
+        self.dense = dense or QdrantDenseRetriever(vector_store)
+        self.sparse = sparse or BM25Retriever()
+        self.fusion = fusion or AlphaFusion()
+
+    def retrieve(self, query: str, top_k: int = 10) -> List[SearchResult]:
+        """
+        Выполнить гибридный поиск.
+
+        Алгоритм:
+        1. Кодируем запрос
+        2. Dense retrieval
+        3. BM25 scoring
+        4. Fusion
+        5. Возвращаем top_k
+
+        Args:
+            query (str): Запрос пользователя
+            top_k (int): Количество результатов
+
+        Returns:
+            List[SearchResult]: Итоговые документы
+        """
+
+        query_vec = self.embedder.encode_queries([query])[0]
+
+        dense_hits = self.dense.search(query_vec, k=top_k * 5)
+
+        if not dense_hits:
             return []
 
-        candidate_docs = [d for d, _ in dense_results]
-        dense_scores = {d.page_content: s for d, s in dense_results}
+        corpus = [d.text for d in dense_hits]
 
-        tokenized_query = self._tokenize(query)
+        sparse_scores = self.sparse.search(query, corpus, k=len(corpus))
 
-        corpus = [
-            self._tokenize(d.page_content)
-            for d in candidate_docs
-        ]
+        fused = self.fusion.fuse(dense_hits, sparse_scores)
 
-        bm25 = BM25Okapi(corpus)
-        bm25_scores_arr = bm25.get_scores(tokenized_query)
-
-        bm25_scores = {
-            candidate_docs[i].page_content: bm25_scores_arr[i]
-            for i in range(len(candidate_docs))
-        }
-
-        dense_n = self._normalize(dense_scores)
-        bm25_n = self._normalize(bm25_scores)
-
-        combined = {}
-
-        for d in candidate_docs:
-            c = d.page_content
-            combined[c] = (
-                self.alpha * dense_n.get(c, 0) +
-                (1 - self.alpha) * bm25_n.get(c, 0)
-            )
-
-        ranked = sorted(
-            candidate_docs,
-            key=lambda d: combined.get(d.page_content, 0),
-            reverse=True
-        )
-
-        seen = set()
-        filtered = []
-
-        for d in ranked:
-            key = d.metadata.get("id") or d.metadata.get("source")
-            if key not in seen:
-                seen.add(key)
-                filtered.append(d)
-
-        top = filtered[:12]
-
-        if self.reranker:
-            top = self.reranker.rerank(
-                query,
-                top,
-                top_k=max(k, 6)
-            )
-
-        return top[:k]
+        return fused[:top_k]
+    
