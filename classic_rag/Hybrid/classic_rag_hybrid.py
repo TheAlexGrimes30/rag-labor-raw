@@ -4,10 +4,13 @@ from typing import List
 
 import yaml
 from langchain_core.documents import Document
+from qdrant_client import QdrantClient
+
 from classic_rag.Hybrid.generator import Generator
-from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
+from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
 from classic_rag.Hybrid.reranker import Reranker
-from classic_rag.Hybrid.retriever import HybridRetriever
+from classic_rag.Hybrid.retriever import Retriever, Embedder
+from classic_rag.Hybrid.storage import VectorStore
 
 
 class ClassicRAG:
@@ -19,11 +22,48 @@ class ClassicRAG:
         print("Chunking...")
         self.chunks = self.chunk_documents(self.documents)
 
+        self.embedder = Embedder(
+            model_name="intfloat/multilingual-e5-base"
+        )
+
+        self.client = QdrantClient(host="localhost", port=6333)
+
+        self.vector_store = VectorStore(
+            client=self.client,
+            collection_name="rag_collection",
+            vector_size=self.embedder.dim
+        )
+
+        self.vector_store.ensure_collection()
+
+        print("Indexing chunks into Qdrant...")
+        self._index_chunks()
+
+        self.retriever = Retriever(
+            vector_store=self.vector_store,
+            embedder=self.embedder
+        )
+
         self.reranker = Reranker()
 
-        self.retriever = HybridRetriever(self.chunks)
-
         self.generator = Generator()
+
+    def _index_chunks(self):
+
+        texts = [c.page_content for c in self.chunks]
+
+        payloads = []
+        for c in self.chunks:
+            p = dict(c.metadata)
+            p["text"] = c.page_content
+            payloads.append(p)
+
+        vectors = self.embedder.encode_passages(texts)
+
+        import uuid
+        ids = [str(uuid.uuid4()) for _ in texts]
+
+        self.vector_store.upsert(ids, vectors, payloads)
 
     def _parse_markdown_with_metadata(self, text: str):
         if text.startswith("---"):
@@ -118,20 +158,7 @@ class ClassicRAG:
         return chunks
 
     def retrieve(self, query: str) -> List[SearchResult]:
-
-        docs = self.retriever.retrieve(query, k=10)
-
-        results = [
-            SearchResult(
-                text=d.page_content,
-                score=0.0,
-                payload=d.metadata,
-                source="retriever"
-            )
-            for d in docs
-        ]
-
-        return results
+        return self.retriever.retrieve(query, top_k=10)
 
     def rerank(self, query: str, hits: List[SearchResult]) -> List[SearchResult]:
         return self.reranker.rerank(query, hits, top_n=5)
