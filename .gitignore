@@ -3,3 +3,4 @@ venv
 .idea
 faiss_index
 models
+__pycache__/
