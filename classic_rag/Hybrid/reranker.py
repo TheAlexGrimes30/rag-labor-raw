@@ -1,44 +1,107 @@
-from typing import List
+from functools import lru_cache
+from typing import List, Tuple
 
-from langchain_core.documents import Document
 from sentence_transformers import CrossEncoder
 
+from classic_rag.Hybrid.rag_config import SearchResult
 
-class Reranker:
-    """
-    Cross-encoder based reranker for ranking retrieved documents by relevance.
+RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
 
-    This class uses a sentence-transformers CrossEncoder model to score
-    (query, document) pairs and return the most relevant documents.
-    """
+class BaseReranker:
+    def rerank(
+        self,
+        query: str,
+        hits: List["SearchResult"],
+        *,
+        top_n: int
+    ) -> List["SearchResult"]:
+        raise NotImplementedError
 
-    def __init__(self):
-        """
-        Initialize the reranker model.
-        Loads a pretrained CrossEncoder model for relevance scoring.
-        """
 
+class Reranker(BaseReranker):
+
+    def __init__(
+        self,
+        model_name: str = RERANK_MODEL,
+        batch_size: int = 32,
+    ):
+        self.model_name = model_name
+        self.batch_size = batch_size
+        self._model = self._get_model(model_name)
+
+    @staticmethod
+    @lru_cache(maxsize=2)
+    def _get_model(model_name: str) -> CrossEncoder:
         print("Loading Cross-Encoder Reranker...")
-        self.model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")
+        return CrossEncoder(model_name)
 
-    def rerank(self, query: str, docs: List[Document], top_k: int = 6) -> List[Document]:
-        """
-        Rerank a list of documents based on their relevance to the query.
 
-        Args:
-            query (str): The user query.
-            docs (List[Document]): List of retrieved documents to rerank.
-            top_k (int, optional): Number of top documents to return. Defaults to 6.
+    def rerank(
+        self,
+        query: str,
+        hits: List["SearchResult"],
+        *,
+        top_n: int = 6
+    ) -> List["SearchResult"]:
 
-        Returns:
-            List[Document]: Top-k documents sorted by relevance (descending).
-        """
-
-        if not docs:
+        if not hits:
             return []
 
-        pairs = [(query, d.page_content) for d in docs]
-        scores = self.model.predict(pairs)
+        filtered_hits: List["SearchResult"] = [
+            h for h in hits if h is not None
+        ]
 
-        ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-        return [d for _, d in ranked[:top_k]]
+        if not filtered_hits:
+            return []
+
+        pairs: List[Tuple[str, str]] = [
+            (query, (h.text or "").strip())
+            for h in filtered_hits
+        ]
+
+        scores = self._predict_batched(pairs)
+
+        if hasattr(scores, "tolist"):
+            scores = scores.tolist()
+
+        ranked = sorted(
+            zip(filtered_hits, scores),
+            key=lambda x: x[1],
+            reverse=True
+        )
+
+        return [
+            SearchResult.from_rerank(base=h, score=float(score))
+            for h, score in ranked[:top_n]
+        ]
+
+    def _predict_batched(
+        self,
+        pairs: List[Tuple[str, str]]
+    ) -> List[float]:
+
+        all_scores: List[float] = []
+
+        for i in range(0, len(pairs), self.batch_size):
+            batch = pairs[i:i + self.batch_size]
+
+            batch = [
+                (str(q), str(doc))
+                for q, doc in batch
+                if q is not None and doc is not None
+            ]
+
+            if not batch:
+                continue
+
+            batch_scores = self._model.predict(
+                batch,
+                show_progress_bar=False
+            )
+
+            if hasattr(batch_scores, "tolist"):
+                batch_scores = batch_scores.tolist()
+
+            all_scores.extend(batch_scores)
+
+        return all_scores

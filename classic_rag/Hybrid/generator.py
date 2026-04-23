@@ -1,8 +1,15 @@
 import re
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 from llama_cpp import Llama
 
+
+class BaseLLMClient(ABC):
+
+    @abstractmethod
+    def generate(self, prompt: str) -> str:
+        raise NotImplementedError
 
 class Generator:
 
@@ -79,3 +86,69 @@ class Generator:
         answer = answer.strip()
 
         return answer
+
+
+class QwenClient(BaseLLMClient):
+
+    def __init__(self, model_path: str):
+        self.llm = Llama(
+            model_path=model_path,
+            n_ctx=4096,
+            n_threads=8,
+            temperature=0.1,
+            top_p=0.85,
+            repeat_penalty=1.2,
+        )
+
+    def generate(self, prompt: str) -> str:
+        output = self.llm(
+            prompt,
+            max_tokens=220,
+            temperature=0.1,
+            stop=["=== ВОПРОС ===", "=== КОНТЕКСТ ==="]
+        )
+
+        answer = output["choices"][0]["text"].strip()
+        answer = re.sub(r"\n{2,}", "\n", answer)
+        return answer.strip()
+
+class BasePromptBuilder(ABC):
+
+    @abstractmethod
+    def build(self, query: str, context: str) -> str:
+        raise NotImplementedError
+
+class LegalPromptBuilder(BasePromptBuilder):
+
+    def build(self, query: str, context: str) -> str:
+        return f"""
+                Ты — юридический ассистент по трудовому праву РФ.
+
+                === ЗАДАЧА ===
+                Сформируй короткий юридически точный ответ.
+
+                === ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО) ===
+                1 строка — "Да/Нет/Краткий ответ"
+                2 строка — пояснение
+                3 строка — ссылка на ТК РФ (если есть)
+
+                === ПРАВИЛА ===
+                - НЕ пиши "НЕТ ОТВЕТА"
+                - ВСЕГДА пытайся ответить по контексту
+                - Если информации мало — дай общий юридически корректный ответ
+                - НЕ рассуждай
+                - НЕ повторяй вопрос
+                - Убери лишние пробелы и переносы
+
+                === ПРИМЕР ===
+                Можно ли работать с 14 лет?
+                Да. Можно. В соответствии со статьёй 63 ТК РФ. Несовершеннолетние с 14 лет могут работать с согласия родителей и органов опеки в свободное от учёбы время.
+
+                === КОНТЕКСТ ===
+                {context}
+
+                === ВОПРОС ===
+                {query}
+
+                === ОТВЕТ ===
+                """.strip()
