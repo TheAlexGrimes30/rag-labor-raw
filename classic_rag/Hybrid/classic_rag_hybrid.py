@@ -1,12 +1,13 @@
-import re
 from pathlib import Path
 from typing import List
 
+import uuid
 import yaml
 from langchain_core.documents import Document
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
+from classic_rag.Hybrid.rag_chunkers import SentenceChunker, WindowChunker, StructureChunker, SmartChunker
 from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
 from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
@@ -19,8 +20,29 @@ class ClassicRAG:
         print("Loading documents...")
         self.documents = self.load_documents()
 
+        sentence_chunker = SentenceChunker(
+            chunk_size=800,
+            overlap_sentences=2
+        )
+
+        window_chunker = WindowChunker(
+            max_chars=800,
+            overlap=150
+        )
+
+        structure_chunker = StructureChunker(
+            fallback_chunker=sentence_chunker
+        )
+
+        self.chunker = SmartChunker(
+            structure_chunker=structure_chunker,
+            sentence_chunker=sentence_chunker,
+            window_chunker=window_chunker,
+            max_chars=800
+        )
+
         print("Chunking...")
-        self.chunks = self.chunk_documents(self.documents)
+        self.chunks = self._chunk_documents(self.documents)
 
         self.embedder = Embedder(
             model_name="intfloat/multilingual-e5-base"
@@ -71,12 +93,12 @@ class ClassicRAG:
 
         vectors = self.embedder.encode_passages(texts)
 
-        import uuid
         ids = [str(uuid.uuid4()) for _ in texts]
 
         self.vector_store.upsert(ids, vectors, payloads)
 
     def _parse_markdown_with_metadata(self, text: str):
+
         if text.startswith("---"):
             parts = text.split("---", 2)
 
@@ -126,47 +148,29 @@ class ClassicRAG:
         print(f"Loaded {len(docs)} docs")
         return docs
 
-    def chunk_documents(self, docs, chunk_size: int = 800, overlap_sentences: int = 2):
+    def _chunk_documents(self, docs: List[Document]) -> List[Document]:
 
-        chunks = []
+        all_chunks: List[Document] = []
 
         for d in docs:
-            text = re.sub(r"\n{3,}", "\n\n", d.page_content).strip()
-            sentences = re.split(r"(?<=[.!?])\s+", text)
+            chunk_list = self.chunker.split(
+                d.page_content,
+                source=d.metadata.get("file")
+            )
 
-            current = []
-            current_len = 0
+            for chunk in chunk_list:
+                metadata = dict(d.metadata)
+                metadata.update(chunk.payload)
 
-            for sent in sentences:
-                sent_len = len(sent)
+                all_chunks.append(
+                    Document(
+                        page_content=chunk.text,
+                        metadata=metadata
+                    )
+                )
 
-                if current_len + sent_len > chunk_size:
-
-                    chunk_text = " ".join(current).strip()
-
-                    if len(chunk_text) > 120:
-                        chunks.append(Document(
-                            page_content=chunk_text,
-                            metadata=d.metadata
-                        ))
-
-                    current = current[-overlap_sentences:]
-                    current_len = sum(len(x) for x in current)
-
-                current.append(sent)
-                current_len += sent_len
-
-            if current:
-                chunk_text = " ".join(current).strip()
-
-                if len(chunk_text) > 120:
-                    chunks.append(Document(
-                        page_content=chunk_text,
-                        metadata=d.metadata
-                    ))
-
-        print(f"Total chunks: {len(chunks)}")
-        return chunks
+        print(f"Total chunks: {len(all_chunks)}")
+        return all_chunks
 
     def retrieve(self, query: str) -> List[SearchResult]:
         return self.retriever.retrieve(query, top_k=10)
