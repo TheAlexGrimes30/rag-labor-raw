@@ -57,7 +57,7 @@ class QwenClient(BaseLLMClient):
 
         answer = output["choices"][0]["text"].strip()
 
-        answer = re.sub(r"\*\*.*?\*\*", "", answer)  # **Ответ**
+        answer = re.sub(r"\*\*.*?\*\*", "", answer)
         answer = re.sub(r"\n{2,}", "\n", answer)
 
         lines = [l.strip() for l in answer.split("\n") if l.strip()]
