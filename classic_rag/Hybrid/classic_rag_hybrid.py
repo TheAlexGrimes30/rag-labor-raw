@@ -2,6 +2,8 @@ from pathlib import Path
 from typing import List
 
 import uuid
+
+from langchain_core.documents import Document
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
@@ -12,7 +14,93 @@ from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
 
+class IngestionService:
+    def __init__(self, pipeline: IngestionPipeline):
+        self.pipeline = pipeline
 
+    def load_chunks(self) -> List[Document]:
+        chunks = self.pipeline.run()
+        print(f"[Ingestion] Loaded chunks: {len(chunks)}")
+        return chunks
+
+class IndexService:
+    def __init__(self, vector_store: VectorStore, embedder: Embedder):
+        self.vector_store = vector_store
+        self.embedder = embedder
+
+    def index(self, chunks: List[Document]):
+        if not chunks:
+            return
+
+        texts = [c.page_content for c in chunks]
+
+        payloads = []
+        for c in chunks:
+            p = dict(c.metadata)
+            p["text"] = c.page_content
+            payloads.append(p)
+
+        vectors = self.embedder.encode_passages(texts)
+        ids = [str(uuid.uuid4()) for _ in texts]
+
+        self.vector_store.upsert(ids, vectors, payloads)
+
+        print(f"[Index] Indexed: {len(chunks)} chunks")
+
+class RAGService:
+    def __init__(self, retriever: Retriever, reranker: Reranker, generator: Generator):
+        self.retriever = retriever
+        self.reranker = reranker
+        self.generator = generator
+
+    def ask(self, query: str) -> RAGResponse:
+
+        hits = self.retriever.retrieve(query, top_k=10)
+
+        print("\n--- RETRIEVER RESULTS ---")
+        for h in hits[:5]:
+            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
+
+        reranked = self.reranker.rerank(query, hits, top_n=5)
+
+        print("\n--- RERANKED RESULTS ---")
+        for h in reranked:
+            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
+
+        context = self._build_context(reranked)
+
+        answer = self.generator.generate(query, context)
+
+        return RAGResponse(
+            answer=answer,
+            sources=[h.payload for h in reranked]
+        )
+
+    def _build_context(self, hits: List[SearchResult]) -> str:
+        parts = []
+
+        for h in hits:
+            src = h.payload.get("file", "unknown")
+            article = h.payload.get("article_number")
+            header = h.payload.get("header")
+
+            if len(h.text) < 100:
+                continue
+
+            meta = []
+
+            if article:
+                meta.append(f"Статья {article} ТК РФ")
+
+            if header:
+                meta.append(header)
+
+            meta_str = " | ".join(meta)
+
+            parts.append(f"[SOURCE: {src} | {meta_str}]\n{h.text}")
+
+        return "\n\n---\n\n".join(parts)[:2500]
+    
 class ClassicRAG:
 
     def __init__(self):
