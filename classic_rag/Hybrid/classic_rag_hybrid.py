@@ -1,3 +1,5 @@
+import atexit
+import gc
 from pathlib import Path
 from typing import List
 
@@ -183,13 +185,25 @@ class ClassicRAG:
 
         for h in hits:
             src = h.payload.get("file", "unknown")
+            article = h.payload.get("article_number")
+            header = h.payload.get("header")
 
             if len(h.text) < 100:
                 continue
 
-            parts.append(f"[SOURCE: {src}]\n{h.text}")
+            meta = []
 
-        return "\n\n---\n\n".join(parts)[:4500]
+            if article:
+                meta.append(f"Статья {article} ТК РФ")
+
+            if header:
+                meta.append(header)
+
+            meta_str = " | ".join(meta)
+
+            parts.append(f"[SOURCE: {src} | {meta_str}]\n{h.text}")
+
+        return "\n\n---\n\n".join(parts)[:2500]
 
     def ask(self, query: str) -> RAGResponse:
 
@@ -214,19 +228,40 @@ class ClassicRAG:
             sources=[h.payload for h in reranked]
         )
 
+    def close(self):
+        print("Shutting down RAG...")
+
+        if hasattr(self.generator, "llm") and hasattr(self.generator.llm, "close"):
+            self.generator.llm.close()
+
+        self.generator = None
+        self.retriever = None
+        self.reranker = None
+
+        self.client.close()
+
+def safe_exit():
+    gc.collect()
+
+atexit.register(safe_exit)
+
 
 if __name__ == "__main__":
 
     rag = ClassicRAG()
 
-    questions = [
-        "какие цели трудового законодательства",
-        "что регулирует трудовое законодательство",
-        "что такое свобода труда",
-        "какие принципы трудового права",
-    ]
+    try:
+        questions = [
+            "какие цели трудового законодательства",
+            "что регулирует трудовое законодательство",
+            "что такое свобода труда",
+            "какие принципы трудового права",
+        ]
 
-    for q in questions:
-        print("\nQ:", q)
-        res = rag.ask(q)
-        print("A:", res.answer)
+        for q in questions:
+            print("\nQ:", q)
+            res = rag.ask(q)
+            print("A:", res.answer)
+
+    finally:
+        rag.close()

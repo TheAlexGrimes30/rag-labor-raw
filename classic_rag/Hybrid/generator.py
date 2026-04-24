@@ -10,6 +10,7 @@ class BaseLLMClient(ABC):
     def generate(self, prompt: str) -> str:
         raise NotImplementedError
 
+
 class BasePromptBuilder(ABC):
 
     @abstractmethod
@@ -49,17 +50,34 @@ class QwenClient(BaseLLMClient):
     def generate(self, prompt: str) -> str:
         output = self.llm(
             prompt,
-            max_tokens=220,
-            temperature=0.1,
-            stop=["=== ВОПРОС ===", "=== КОНТЕКСТ ==="]
+            max_tokens=120,
+            temperature=0.05,
+            stop=["=== ВОПРОС ===", "=== КОНТЕКСТ ===", "=== ОТВЕТ ==="]
         )
 
         answer = output["choices"][0]["text"].strip()
+
+        answer = re.sub(r"\*\*.*?\*\*", "", answer)  # **Ответ**
         answer = re.sub(r"\n{2,}", "\n", answer)
-        answer = answer.strip()
 
-        return answer
+        lines = [l.strip() for l in answer.split("\n") if l.strip()]
 
+        clean_lines = []
+        for l in lines:
+            if not clean_lines or clean_lines[-1] != l:
+                clean_lines.append(l)
+
+        clean_lines = clean_lines[:3]
+
+        return "\n".join(clean_lines)
+
+    def close(self):
+        if self.llm is not None:
+            try:
+                del self.llm
+            except Exception:
+                pass
+            self.llm = None
 
 class LaborPromptBuilder(BasePromptBuilder):
 
@@ -116,3 +134,4 @@ class Generator(BaseGenerator):
         prompt = self.prompt_builder.build(query, context)
 
         return self.llm.generate(prompt)
+
