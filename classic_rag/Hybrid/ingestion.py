@@ -55,3 +55,43 @@ class DocumentLoader:
 
         except Exception:
             return {}, text
+
+
+class IngestionPipeline:
+    def __init__(self, loader, chunker):
+        self.loader = loader
+        self.chunker = chunker
+
+    def run(self) -> List[Document]:
+        docs = self.loader.load()
+
+        if not docs:
+            return []
+
+        chunks = []
+
+        for doc in docs:
+            text = doc.page_content
+            source = doc.metadata.get("source")
+
+            chunked = self.chunker.split(text, source=source)
+
+            for ch in chunked:
+                chunks.append(
+                    Document(
+                        page_content=ch.text,
+                        metadata={
+                            **doc.metadata,
+                            **ch.payload
+                        }
+                    )
+                )
+
+        return self._clean(chunks)
+
+    def _clean(self, chunks: List[Document]) -> List[Document]:
+        return [
+            c for c in chunks
+            if c.page_content and c.page_content.strip()
+        ]
+    
