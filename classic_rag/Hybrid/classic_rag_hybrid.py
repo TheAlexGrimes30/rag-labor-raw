@@ -6,8 +6,8 @@ import yaml
 from langchain_core.documents import Document
 from qdrant_client import QdrantClient
 
-from classic_rag.Hybrid.generator import Generator
-from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
+from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
+from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
 from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
@@ -46,7 +46,18 @@ class ClassicRAG:
 
         self.reranker = Reranker()
 
-        self.generator = Generator()
+        base_dir = Path(__file__).resolve().parents[2]
+        model_path = base_dir / "models" / "Qwen3-8B-Q4_K_M.gguf"
+
+        llm = QwenClient(str(model_path))
+        prompt_builder = LaborPromptBuilder()
+        cleaner = ContextCleaner()
+
+        self.generator = Generator(
+            llm=llm,
+            prompt_builder=prompt_builder,
+            cleaner=cleaner
+        )
 
     def _index_chunks(self):
 
