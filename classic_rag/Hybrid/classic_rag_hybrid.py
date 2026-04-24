@@ -1,5 +1,3 @@
-import atexit
-import gc
 from pathlib import Path
 from typing import List
 
@@ -239,11 +237,6 @@ class ClassicRAG:
         self.reranker = None
 
         self.client.close()
-
-def safe_exit():
-    gc.collect()
-
-atexit.register(safe_exit)
 
 
 if __name__ == "__main__":
