@@ -5,6 +5,7 @@ import yaml
 from langchain_core.documents import Document
 
 
+
 class DocumentLoader:
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
@@ -20,13 +21,20 @@ class DocumentLoader:
 
             metadata, content = self._parse_markdown(raw)
 
+            content = (content or "").strip()
+            if not content:
+                continue
+
+            classic = metadata.get("classic_rag", {}) or {}
+            topics = classic.get("topics", []) if isinstance(classic, dict) else []
+
             documents.append(
                 Document(
                     page_content=content,
                     metadata={
                         "source": str(file_path),
                         "file": file_path.name,
-                        "topics": metadata.get("classic_rag", {}).get("topics", [])
+                        "topics": topics
                     }
                 )
             )
@@ -34,24 +42,26 @@ class DocumentLoader:
         return documents
 
     def _parse_markdown(self, text: str) -> Tuple[Dict[str, Any], str]:
-
         if not text.startswith("---"):
             return {}, text
 
         try:
             parts = text.split("---", 2)
-
             if len(parts) < 3:
                 return {}, text
 
             meta_raw = yaml.safe_load(parts[1]) or {}
-            content = parts[2].strip()
+
+            if not isinstance(meta_raw, dict):
+                meta_raw = {}
+
+            content = parts[2]
 
             classic = meta_raw.get("classic_rag", {})
+            if not isinstance(classic, dict):
+                classic = {}
 
-            return {
-                "classic_rag": classic
-            }, content
+            return {"classic_rag": classic}, content
 
         except Exception:
             return {}, text
@@ -68,22 +78,28 @@ class IngestionPipeline:
         if not docs:
             return []
 
-        chunks = []
+        chunks: List[Document] = []
 
         for doc in docs:
             text = doc.page_content
             source = doc.metadata.get("source")
 
+            if not text or not text.strip():
+                continue
+
             chunked = self.chunker.split(text, source=source)
 
             for ch in chunked:
+                if not ch.text or not ch.text.strip():
+                    continue
+
+                metadata = dict(doc.metadata)
+                metadata.update(ch.payload or {})
+
                 chunks.append(
                     Document(
-                        page_content=ch.text,
-                        metadata={
-                            **doc.metadata,
-                            **ch.payload
-                        }
+                        page_content=ch.text.strip(),
+                        metadata=metadata
                     )
                 )
 
@@ -94,4 +110,3 @@ class IngestionPipeline:
             c for c in chunks
             if c.page_content and c.page_content.strip()
         ]
-    
