@@ -1,426 +1,215 @@
-import re
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict
+from typing import List
 
-import yaml
-from llama_cpp import Llama
-from nltk import SnowballStemmer
-from rank_bm25 import BM25Okapi
+import uuid
+
 from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams
-from langchain_qdrant import QdrantVectorStore
-from sentence_transformers import CrossEncoder
 
-
-@dataclass
-class RAGResponse:
-    answer: str
-    sources: List[Dict]
-
-
-class BaseRetriever(ABC):
-    @abstractmethod
-    def retrieve(self, query: str, k: int = 3) -> List[Document]:
-        pass
-
-
-class Reranker:
-    """
-    Cross-encoder based reranker for ranking retrieved documents by relevance.
-
-    This class uses a sentence-transformers CrossEncoder model to score
-    (query, document) pairs and return the most relevant documents.
-    """
-
-    def __init__(self):
-        """
-        Initialize the reranker model.
-        Loads a pretrained CrossEncoder model for relevance scoring.
-        """
-
-        print("Loading Cross-Encoder Reranker...")
-        self.model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-12-v2")
-
-    def rerank(self, query: str, docs: List[Document], top_k: int = 6) -> List[Document]:
-        """
-        Rerank a list of documents based on their relevance to the query.
-
-        Args:
-            query (str): The user query.
-            docs (List[Document]): List of retrieved documents to rerank.
-            top_k (int, optional): Number of top documents to return. Defaults to 6.
-
-        Returns:
-            List[Document]: Top-k documents sorted by relevance (descending).
-        """
-
-        if not docs:
-            return []
-
-        pairs = [(query, d.page_content) for d in docs]
-        scores = self.model.predict(pairs)
-
-        ranked = sorted(zip(scores, docs), key=lambda x: x[0], reverse=True)
-        return [d for _, d in ranked[:top_k]]
-
-
-class HybridRetriever:
-
-    def __init__(self, documents: List[Document], alpha: float = 0.6, reranker=None):
-        print("Initializing HybridRetriever...")
-
-        self.documents = documents
-        self.alpha = alpha
-        self.reranker = reranker
-
-        self.stemmer = SnowballStemmer("russian")
-
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="intfloat/multilingual-e5-base"
-        )
-
-        self.client = QdrantClient(host="localhost", port=6333)
-        self.collection_name = "labor_law"
-
-        existing = [c.name for c in self.client.get_collections().collections]
-
-        if self.collection_name not in existing:
-            print("Creating Qdrant collection...")
-            self.client.create_collection(
-                collection_name=self.collection_name,
-                vectors_config=VectorParams(
-                    size=768,
-                    distance=Distance.COSINE
-                )
-            )
-
-        self.db = QdrantVectorStore(
-            client=self.client,
-            collection_name=self.collection_name,
-            embedding=self.embeddings
-        )
-
-        if self.client.count(self.collection_name).count == 0:
-            print("Uploading documents...")
-            self.db.add_documents(documents)
-
-    def _tokenize(self, text: str):
-        text = text.lower()
-        text = re.sub(r"[^\w\s]", " ", text)
-        tokens = text.split()
-        return [self.stemmer.stem(t) for t in tokens]
-
-    def _normalize(self, scores: dict):
-        if not scores:
-            return scores
-
-        vals = list(scores.values())
-        mn, mx = min(vals), max(vals)
-
-        if abs(mx - mn) < 1e-8:
-            return {k: 0 for k in scores}
-
-        return {k: (v - mn) / (mx - mn) for k, v in scores.items()}
-
-    def retrieve(self, query: str, k: int = 5):
-
-        dense_results = self.db.similarity_search_with_score(
-            query,
-            k=min(50, len(self.documents))
-        )
-
-        if not dense_results:
-            return []
-
-        candidate_docs = [d for d, _ in dense_results]
-        dense_scores = {d.page_content: s for d, s in dense_results}
-
-        tokenized_query = self._tokenize(query)
-
-        corpus = [
-            self._tokenize(d.page_content)
-            for d in candidate_docs
-        ]
-
-        bm25 = BM25Okapi(corpus)
-        bm25_scores_arr = bm25.get_scores(tokenized_query)
-
-        bm25_scores = {
-            candidate_docs[i].page_content: bm25_scores_arr[i]
-            for i in range(len(candidate_docs))
-        }
-
-        dense_n = self._normalize(dense_scores)
-        bm25_n = self._normalize(bm25_scores)
-
-        combined = {}
-
-        for d in candidate_docs:
-            c = d.page_content
-            combined[c] = (
-                self.alpha * dense_n.get(c, 0) +
-                (1 - self.alpha) * bm25_n.get(c, 0)
-            )
-
-        ranked = sorted(
-            candidate_docs,
-            key=lambda d: combined.get(d.page_content, 0),
-            reverse=True
-        )
-
-        seen = set()
-        filtered = []
-
-        for d in ranked:
-            key = d.metadata.get("id") or d.metadata.get("source")
-            if key not in seen:
-                seen.add(key)
-                filtered.append(d)
-
-        top = filtered[:12]
-
-        if self.reranker:
-            top = self.reranker.rerank(
-                query,
-                top,
-                top_k=max(k, 6)
-            )
-
-        return top[:k]
-
-class Generator:
-
-    def __init__(self):
-        print("Loading LLM...")
-
-        base_dir = Path(__file__).resolve().parent.parent.parent
-        model_path = base_dir / "models" / "Qwen3-8B-Q4_K_M.gguf"
-
-        self.llm = Llama(
-            model_path=str(model_path),
-            n_ctx=4096,
-            n_threads=8,
-            temperature=0.1,
-            top_p=0.85,
-            repeat_penalty=1.2,
-        )
-
-    def clean_context(self, text: str):
-        text = re.sub(r"#+", "", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        return text.strip()
-
-    def build_prompt(self, query: str, context: str):
-
-        return f"""
-        Ты — юридический ассистент по трудовому праву РФ.
-        
-        === ЗАДАЧА ===
-        Сформируй короткий юридически точный ответ.
-        
-        === ФОРМАТ ОТВЕТА (ОБЯЗАТЕЛЬНО) ===
-        1 строка — "Да/Нет/Краткий ответ"
-        2 строка — пояснение
-        3 строка — ссылка на ТК РФ (если есть)
-        
-        === ПРАВИЛА ===
-        - НЕ пиши "НЕТ ОТВЕТА"
-        - ВСЕГДА пытайся ответить по контексту
-        - Если информации мало — дай общий юридически корректный ответ
-        - НЕ рассуждай
-        - НЕ повторяй вопрос
-        - Убери лишние пробелы и переносы
-        
-        === ПРИМЕР ===
-        Можно ли работать с 14 лет?
-        Да. Можно. В соответствии со статьёй 63 ТК РФ. Несовершеннолетние с 14 лет могут работать с согласия родителей и органов опеки в свободное от учёбы время.
-        
-        === КОНТЕКСТ ===
-        {context}
-        
-        === ВОПРОС ===
-        {query}
-        
-        === ОТВЕТ ===
-        """.strip()
-
-    def generate(self, query: str, context: str):
-
-        context = self.clean_context(context)
-
-        if not context:
-            return "Нет данных в источнике."
-
-        prompt = self.build_prompt(query, context)
-
-        output = self.llm(
-            prompt,
-            max_tokens=220,
-            temperature=0.1,
-            stop=["=== ВОПРОС ===", "=== КОНТЕКСТ ==="]
-        )
-
-        answer = output["choices"][0]["text"].strip()
-        answer = re.sub(r"\n{2,}", "\n", answer)
-        answer = answer.strip()
-
-        return answer
-
-
-
-
-class ClassicRAG:
-
-    def __init__(self):
-        print("Loading documents...")
-        self.documents = self.load_documents()
-
-        print("Chunking...")
-        self.chunks = self.chunk_documents(self.documents)
-
-        self.reranker = Reranker()
-        self.retriever = HybridRetriever(self.chunks, reranker=self.reranker)
-        self.generator = Generator()
-
-    def _parse_markdown_with_metadata(self, text: str):
-        if text.startswith("---"):
-            parts = text.split("---", 2)
-
-            if len(parts) >= 3:
-                try:
-                    metadata = yaml.safe_load(parts[1]) or {}
-                except:
-                    metadata = {}
-
-                content = parts[2].strip()
-
-                classic = metadata.get("classic_rag", {})
-                topics = classic.get("topics", [])
-
-                metadata["topics"] = topics
-
-                return metadata, content
-
-        return {}, text
-
-    def load_documents(self):
-        base_path = Path(__file__).resolve()
-
-        project_root = base_path.parents[2]
-
-        rag_db_path = project_root / "rag_db"
-
-        docs = []
-
-        for file_path in rag_db_path.rglob("*.md"):
-            try:
-                raw = file_path.read_text(encoding="utf-8")
-            except Exception:
-                continue
-
-            meta, content = self._parse_markdown_with_metadata(raw)
-
-            meta.update({
-                "source": str(file_path),
-                "file": file_path.name,
-                "root_source": rag_db_path.name
-            })
-
-            docs.append(Document(
-                page_content=content,
-                metadata=meta
-            ))
-
-        print(f"Loaded {len(docs)} docs")
-        return docs
-
-    def chunk_documents(self, docs, chunk_size: int = 800, overlap_sentences: int = 2):
-
-        chunks = []
-
-        for d in docs:
-            text = re.sub(r"\n{3,}", "\n\n", d.page_content).strip()
-
-            sentences = re.split(r"(?<=[.!?])\s+", text)
-
-            current = []
-            current_len = 0
-
-            for sent in sentences:
-                sent_len = len(sent)
-
-                if current_len + sent_len > chunk_size:
-
-                    chunk_text = " ".join(current).strip()
-
-                    if len(chunk_text) > 120:
-                        chunks.append(Document(
-                            page_content=chunk_text,
-                            metadata=d.metadata
-                        ))
-
-                    current = current[-overlap_sentences:]
-                    current_len = sum(len(x) for x in current)
-
-                current.append(sent)
-                current_len += sent_len
-
-            if current:
-                chunk_text = " ".join(current).strip()
-
-                if len(chunk_text) > 120:
-                    chunks.append(Document(
-                        page_content=chunk_text,
-                        metadata=d.metadata
-                    ))
-
-        print(f"Total chunks: {len(chunks)}")
+from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
+from classic_rag.Hybrid.ingestion import MarkdownDocumentLoader, IngestionPipeline
+from classic_rag.Hybrid.rag_chunkers import SentenceChunker, WindowChunker, StructureChunker, SmartChunker
+from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
+from classic_rag.Hybrid.reranker import Reranker
+from classic_rag.Hybrid.retriever import Retriever, Embedder
+from classic_rag.Hybrid.storage import VectorStore
+
+class IngestionService:
+    def __init__(self, pipeline: IngestionPipeline):
+        self.pipeline = pipeline
+
+    def load_chunks(self) -> List[Document]:
+        chunks = self.pipeline.run()
+        print(f"[Ingestion] Loaded chunks: {len(chunks)}")
         return chunks
 
-    def retrieve(self, query):
-        return self.retriever.retrieve(query, k=3)
+class IndexService:
+    def __init__(self, vector_store: VectorStore, embedder: Embedder):
+        self.vector_store = vector_store
+        self.embedder = embedder
 
-    def build_context(self, docs):
-        parts = []
+    def index(self, chunks: List[Document]):
+        if not chunks:
+            return
 
-        for d in docs:
-            src = d.metadata.get("file", "unknown")
+        texts = [c.page_content for c in chunks]
 
-            if len(d.page_content) < 100:
-                continue
+        payloads = []
+        for c in chunks:
+            p = dict(c.metadata)
+            p["text"] = c.page_content
+            payloads.append(p)
 
-            parts.append(f"[SOURCE: {src}]\n{d.page_content}")
+        vectors = self.embedder.encode_passages(texts)
+        ids = [str(uuid.uuid4()) for _ in texts]
 
-        return "\n\n---\n\n".join(parts)[:4500]
+        self.vector_store.upsert(ids, vectors, payloads)
+
+        print(f"[Index] Indexed: {len(chunks)} chunks")
+
+class RAGService:
+    def __init__(self, retriever: Retriever, reranker: Reranker, generator: Generator):
+        self.retriever = retriever
+        self.reranker = reranker
+        self.generator = generator
 
     def ask(self, query: str) -> RAGResponse:
 
-        docs = self.retrieve(query)
-        context = self.build_context(docs)
+        hits = self.retriever.retrieve(query, top_k=10)
+
+        print("\n--- RETRIEVER RESULTS ---")
+        for h in hits[:5]:
+            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
+
+        reranked = self.reranker.rerank(query, hits, top_n=5)
+
+        print("\n--- RERANKED RESULTS ---")
+        for h in reranked:
+            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
+
+        context = self._build_context(reranked)
 
         answer = self.generator.generate(query, context)
 
         return RAGResponse(
             answer=answer,
-            sources=[d.metadata for d in docs]
+            sources=[h.payload for h in reranked]
         )
+
+    def _build_context(self, hits: List[SearchResult]) -> str:
+        parts = []
+
+        for h in hits:
+            src = h.payload.get("file", "unknown")
+            article = h.payload.get("article_number")
+            header = h.payload.get("header")
+
+            if len(h.text) < 100:
+                continue
+
+            meta = []
+
+            if article:
+                meta.append(f"Статья {article} ТК РФ")
+
+            if header:
+                meta.append(header)
+
+            meta_str = " | ".join(meta)
+
+            parts.append(f"[SOURCE: {src} | {meta_str}]\n{h.text}")
+
+        return "\n\n---\n\n".join(parts)[:2500]
+
+class ClassicRAG:
+
+    def __init__(self):
+        base_path = Path(__file__).resolve()
+        project_root = base_path.parents[2]
+        rag_db_path = project_root / "rag_db"
+
+        loader = MarkdownDocumentLoader(str(rag_db_path))
+
+        sentence_chunker = SentenceChunker(
+            chunk_size=800,
+            overlap_sentences=2
+        )
+
+        window_chunker = WindowChunker(
+            max_chars=800,
+            overlap=150
+        )
+
+        structure_chunker = StructureChunker(
+            fallback_chunker=sentence_chunker
+        )
+
+        chunker = SmartChunker(
+            structure_chunker=structure_chunker,
+            sentence_chunker=sentence_chunker,
+            window_chunker=window_chunker,
+            max_chars=800
+        )
+
+        pipeline = IngestionPipeline(
+            loader=loader,
+            chunker=chunker
+        )
+
+        self.ingestion = IngestionService(pipeline)
+
+        embedder = Embedder(
+            model_name="intfloat/multilingual-e5-base"
+        )
+
+        client = QdrantClient(host="localhost", port=6333)
+
+        vector_store = VectorStore(
+            client=client,
+            collection_name="rag_collection",
+            vector_size=embedder.dim
+        )
+
+        vector_store.ensure_collection()
+
+        self.index_service = IndexService(vector_store, embedder)
+
+        retriever = Retriever(
+            vector_store=vector_store,
+            embedder=embedder
+        )
+
+        reranker = Reranker()
+
+        model_path = project_root / "models" / "Qwen3-8B-Q4_K_M.gguf"
+
+        llm = QwenClient(str(model_path))
+
+        generator = Generator(
+            llm=llm,
+            prompt_builder=LaborPromptBuilder(),
+            cleaner=ContextCleaner()
+        )
+
+        self.rag_service = RAGService(retriever, reranker, generator)
+        self.client = client
+        self.generator = generator
+
+        print("Running ingestion...")
+        chunks = self.ingestion.load_chunks()
+
+        print("Indexing...")
+        self.index_service.index(chunks)
+
+
+    def ask(self, query: str) -> RAGResponse:
+        return self.rag_service.ask(query)
+
+    def close(self):
+        print("Shutting down RAG...")
+
+        if hasattr(self.generator, "llm") and hasattr(self.generator.llm, "close"):
+            self.generator.llm.close()
+
+        self.client.close()
+
 
 if __name__ == "__main__":
 
     rag = ClassicRAG()
 
-    questions = [
-        "какие цели трудового законодательства",
-        "что регулирует трудовое законодательство",
-        "что такое свобода труда",
-        "какие принципы трудового права",
-    ]
+    try:
+        questions = [
+            "какие цели трудового законодательства",
+            "что регулирует трудовое законодательство",
+            "что такое свобода труда",
+            "какие принципы трудового права",
+        ]
 
-    for q in questions:
-        print("\nQ:", q)
-        res = rag.ask(q)
-        print("A:", res.answer)
+        for q in questions:
+            print("\nQ:", q)
+            res = rag.ask(q)
+            print("A:", res.answer)
+
+    finally:
+        rag.close()
