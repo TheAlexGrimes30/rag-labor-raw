@@ -2,11 +2,10 @@ from pathlib import Path
 from typing import List
 
 import uuid
-import yaml
-from langchain_core.documents import Document
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
+from classic_rag.Hybrid.ingestion import MarkdownDocumentLoader, IngestionPipeline
 from classic_rag.Hybrid.rag_chunkers import SentenceChunker, WindowChunker, StructureChunker, SmartChunker
 from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
 from classic_rag.Hybrid.reranker import Reranker
@@ -18,7 +17,11 @@ class ClassicRAG:
 
     def __init__(self):
         print("Loading documents...")
-        self.documents = self.load_documents()
+        base_path = Path(__file__).resolve()
+        project_root = base_path.parents[2]
+        rag_db_path = project_root / "rag_db"
+
+        self.loader = MarkdownDocumentLoader(str(rag_db_path))
 
         sentence_chunker = SentenceChunker(
             chunk_size=800,
@@ -41,8 +44,15 @@ class ClassicRAG:
             max_chars=800
         )
 
-        print("Chunking...")
-        self.chunks = self._chunk_documents(self.documents)
+        self.pipeline = IngestionPipeline(
+            loader=self.loader,
+            chunker=self.chunker
+        )
+
+        print("Running ingestion pipeline...")
+        self.chunks = self.pipeline.run()
+
+        print(f"Total chunks: {len(self.chunks)}")
 
         self.embedder = Embedder(
             model_name="intfloat/multilingual-e5-base"
@@ -72,13 +82,11 @@ class ClassicRAG:
         model_path = base_dir / "models" / "Qwen3-8B-Q4_K_M.gguf"
 
         llm = QwenClient(str(model_path))
-        prompt_builder = LaborPromptBuilder()
-        cleaner = ContextCleaner()
 
         self.generator = Generator(
             llm=llm,
-            prompt_builder=prompt_builder,
-            cleaner=cleaner
+            prompt_builder=LaborPromptBuilder(),
+            cleaner=ContextCleaner()
         )
 
     def _index_chunks(self):
@@ -92,85 +100,8 @@ class ClassicRAG:
             payloads.append(p)
 
         vectors = self.embedder.encode_passages(texts)
-
         ids = [str(uuid.uuid4()) for _ in texts]
-
         self.vector_store.upsert(ids, vectors, payloads)
-
-    def _parse_markdown_with_metadata(self, text: str):
-
-        if text.startswith("---"):
-            parts = text.split("---", 2)
-
-            if len(parts) >= 3:
-                try:
-                    metadata = yaml.safe_load(parts[1]) or {}
-                except:
-                    metadata = {}
-
-                content = parts[2].strip()
-
-                classic = metadata.get("classic_rag", {})
-                topics = classic.get("topics", [])
-
-                metadata["topics"] = topics
-
-                return metadata, content
-
-        return {}, text
-
-    def load_documents(self):
-        base_path = Path(__file__).resolve()
-        project_root = base_path.parents[2]
-        rag_db_path = project_root / "rag_db"
-
-        docs = []
-
-        for file_path in rag_db_path.rglob("*.md"):
-            try:
-                raw = file_path.read_text(encoding="utf-8")
-            except Exception:
-                continue
-
-            meta, content = self._parse_markdown_with_metadata(raw)
-
-            meta.update({
-                "source": str(file_path),
-                "file": file_path.name,
-                "root_source": rag_db_path.name
-            })
-
-            docs.append(Document(
-                page_content=content,
-                metadata=meta
-            ))
-
-        print(f"Loaded {len(docs)} docs")
-        return docs
-
-    def _chunk_documents(self, docs: List[Document]) -> List[Document]:
-
-        all_chunks: List[Document] = []
-
-        for d in docs:
-            chunk_list = self.chunker.split(
-                d.page_content,
-                source=d.metadata.get("file")
-            )
-
-            for chunk in chunk_list:
-                metadata = dict(d.metadata)
-                metadata.update(chunk.payload)
-
-                all_chunks.append(
-                    Document(
-                        page_content=chunk.text,
-                        metadata=metadata
-                    )
-                )
-
-        print(f"Total chunks: {len(all_chunks)}")
-        return all_chunks
 
     def retrieve(self, query: str) -> List[SearchResult]:
         return self.retriever.retrieve(query, top_k=10)

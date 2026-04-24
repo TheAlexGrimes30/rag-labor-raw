@@ -1,3 +1,4 @@
+from abc import abstractmethod, ABC
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
 
@@ -5,13 +6,18 @@ import yaml
 from langchain_core.documents import Document
 
 
+class BaseDocumentLoader(ABC):
 
-class DocumentLoader:
+    @abstractmethod
+    def load(self) -> List[Document]:
+        raise NotImplementedError
+
+class MarkdownDocumentLoader(BaseDocumentLoader):
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
 
     def load(self) -> List[Document]:
-        documents: List[Document] = []
+        docs: List[Document] = []
 
         for file_path in self.data_dir.rglob("*.md"):
             try:
@@ -28,18 +34,20 @@ class DocumentLoader:
             classic = metadata.get("classic_rag", {}) or {}
             topics = classic.get("topics", []) if isinstance(classic, dict) else []
 
-            documents.append(
+            docs.append(
                 Document(
                     page_content=content,
                     metadata={
                         "source": str(file_path),
                         "file": file_path.name,
-                        "topics": topics
+                        "topics": topics,
+                        "classic_rag": classic
                     }
                 )
             )
 
-        return documents
+        print(f"Loaded docs: {len(docs)}")
+        return docs
 
     def _parse_markdown(self, text: str) -> Tuple[Dict[str, Any], str]:
         if not text.startswith("---"):
@@ -51,7 +59,6 @@ class DocumentLoader:
                 return {}, text
 
             meta_raw = yaml.safe_load(parts[1]) or {}
-
             if not isinstance(meta_raw, dict):
                 meta_raw = {}
 
@@ -82,6 +89,7 @@ class IngestionPipeline:
 
         for doc in docs:
             text = doc.page_content
+
             source = doc.metadata.get("source")
 
             if not text or not text.strip():
