@@ -100,16 +100,15 @@ class RAGService:
             parts.append(f"[SOURCE: {src} | {meta_str}]\n{h.text}")
 
         return "\n\n---\n\n".join(parts)[:2500]
-    
+
 class ClassicRAG:
 
     def __init__(self):
-        print("Loading documents...")
         base_path = Path(__file__).resolve()
         project_root = base_path.parents[2]
         rag_db_path = project_root / "rag_db"
 
-        self.loader = MarkdownDocumentLoader(str(rag_db_path))
+        loader = MarkdownDocumentLoader(str(rag_db_path))
 
         sentence_chunker = SentenceChunker(
             chunk_size=800,
@@ -125,135 +124,72 @@ class ClassicRAG:
             fallback_chunker=sentence_chunker
         )
 
-        self.chunker = SmartChunker(
+        chunker = SmartChunker(
             structure_chunker=structure_chunker,
             sentence_chunker=sentence_chunker,
             window_chunker=window_chunker,
             max_chars=800
         )
 
-        self.pipeline = IngestionPipeline(
-            loader=self.loader,
-            chunker=self.chunker
+        pipeline = IngestionPipeline(
+            loader=loader,
+            chunker=chunker
         )
 
-        print("Running ingestion pipeline...")
-        self.chunks = self.pipeline.run()
+        self.ingestion = IngestionService(pipeline)
 
-        print(f"Total chunks: {len(self.chunks)}")
-
-        self.embedder = Embedder(
+        embedder = Embedder(
             model_name="intfloat/multilingual-e5-base"
         )
 
-        self.client = QdrantClient(host="localhost", port=6333)
+        client = QdrantClient(host="localhost", port=6333)
 
-        self.vector_store = VectorStore(
-            client=self.client,
+        vector_store = VectorStore(
+            client=client,
             collection_name="rag_collection",
-            vector_size=self.embedder.dim
+            vector_size=embedder.dim
         )
 
-        self.vector_store.ensure_collection()
+        vector_store.ensure_collection()
 
-        print("Indexing chunks into Qdrant...")
-        self._index_chunks()
+        self.index_service = IndexService(vector_store, embedder)
 
-        self.retriever = Retriever(
-            vector_store=self.vector_store,
-            embedder=self.embedder
+        retriever = Retriever(
+            vector_store=vector_store,
+            embedder=embedder
         )
 
-        self.reranker = Reranker()
+        reranker = Reranker()
 
-        base_dir = Path(__file__).resolve().parents[2]
-        model_path = base_dir / "models" / "Qwen3-8B-Q4_K_M.gguf"
+        model_path = project_root / "models" / "Qwen3-8B-Q4_K_M.gguf"
 
         llm = QwenClient(str(model_path))
 
-        self.generator = Generator(
+        generator = Generator(
             llm=llm,
             prompt_builder=LaborPromptBuilder(),
             cleaner=ContextCleaner()
         )
 
-    def _index_chunks(self):
+        self.rag_service = RAGService(retriever, reranker, generator)
+        self.client = client
+        self.generator = generator
 
-        texts = [c.page_content for c in self.chunks]
+        print("Running ingestion...")
+        chunks = self.ingestion.load_chunks()
 
-        payloads = []
-        for c in self.chunks:
-            p = dict(c.metadata)
-            p["text"] = c.page_content
-            payloads.append(p)
+        print("Indexing...")
+        self.index_service.index(chunks)
 
-        vectors = self.embedder.encode_passages(texts)
-        ids = [str(uuid.uuid4()) for _ in texts]
-        self.vector_store.upsert(ids, vectors, payloads)
-
-    def retrieve(self, query: str) -> List[SearchResult]:
-        return self.retriever.retrieve(query, top_k=10)
-
-    def rerank(self, query: str, hits: List[SearchResult]) -> List[SearchResult]:
-        return self.reranker.rerank(query, hits, top_n=5)
-
-    def build_context(self, hits: List[SearchResult]) -> str:
-        parts = []
-
-        for h in hits:
-            src = h.payload.get("file", "unknown")
-            article = h.payload.get("article_number")
-            header = h.payload.get("header")
-
-            if len(h.text) < 100:
-                continue
-
-            meta = []
-
-            if article:
-                meta.append(f"Статья {article} ТК РФ")
-
-            if header:
-                meta.append(header)
-
-            meta_str = " | ".join(meta)
-
-            parts.append(f"[SOURCE: {src} | {meta_str}]\n{h.text}")
-
-        return "\n\n---\n\n".join(parts)[:2500]
 
     def ask(self, query: str) -> RAGResponse:
-
-        hits = self.retrieve(query)
-
-        print("\n--- RETRIEVER RESULTS ---")
-        for h in hits[:5]:
-            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
-
-        reranked = self.rerank(query, hits)
-
-        print("\n--- RERANKED RESULTS ---")
-        for h in reranked:
-            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
-
-        context = self.build_context(reranked)
-
-        answer = self.generator.generate(query, context)
-
-        return RAGResponse(
-            answer=answer,
-            sources=[h.payload for h in reranked]
-        )
+        return self.rag_service.ask(query)
 
     def close(self):
         print("Shutting down RAG...")
 
         if hasattr(self.generator, "llm") and hasattr(self.generator.llm, "close"):
             self.generator.llm.close()
-
-        self.generator = None
-        self.retriever = None
-        self.reranker = None
 
         self.client.close()
 
