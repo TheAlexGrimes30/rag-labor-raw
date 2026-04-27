@@ -10,7 +10,6 @@ from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuild
 from classic_rag.Hybrid.ingestion import MarkdownDocumentLoader, IngestionPipeline
 from classic_rag.Hybrid.rag_chunkers import SentenceChunker, WindowChunker, StructureChunker, SmartChunker
 from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
-from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
 
@@ -48,9 +47,8 @@ class IndexService:
         print(f"[Index] Indexed: {len(chunks)} chunks")
 
 class RAGService:
-    def __init__(self, retriever: Retriever, reranker: Reranker, generator: Generator):
+    def __init__(self, retriever: Retriever, generator: Generator):
         self.retriever = retriever
-        self.reranker = reranker
         self.generator = generator
 
     def ask(self, query: str) -> RAGResponse:
@@ -61,31 +59,29 @@ class RAGService:
         for h in hits[:5]:
             print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
 
-        reranked = self.reranker.rerank(query, hits, top_n=5)
+        top_hits = hits[:5]
 
-        print("\n--- RERANKED RESULTS ---")
-        for h in reranked:
-            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
-
-        context = self._build_context(reranked)
+        context = self._build_context(top_hits)
 
         answer = self.generator.generate(query, context)
 
         return RAGResponse(
             answer=answer,
-            sources=[h.payload for h in reranked]
+            sources=[h.payload for h in top_hits]
         )
 
     def _build_context(self, hits: List[SearchResult]) -> str:
         parts = []
 
         for h in hits:
+            text = (h.text or "").strip()
+
+            if len(text) < 30:
+                continue
+
             src = h.payload.get("file", "unknown")
             article = h.payload.get("article_number")
             header = h.payload.get("header")
-
-            if len(h.text) < 100:
-                continue
 
             meta = []
 
@@ -97,9 +93,9 @@ class RAGService:
 
             meta_str = " | ".join(meta)
 
-            parts.append(f"[SOURCE: {src} | {meta_str}]\n{h.text}")
+            parts.append(f"[SOURCE: {src} | {meta_str}]\n{text}")
 
-        return "\n\n---\n\n".join(parts)[:2500]
+        return "\n\n---\n\n".join(parts)[:5000]
 
 class ClassicRAG:
 
@@ -159,7 +155,6 @@ class ClassicRAG:
             embedder=embedder
         )
 
-        reranker = Reranker()
 
         model_path = project_root / "models" / "Qwen3-8B-Q4_K_M.gguf"
 
@@ -171,7 +166,7 @@ class ClassicRAG:
             cleaner=ContextCleaner()
         )
 
-        self.rag_service = RAGService(retriever, reranker, generator)
+        self.rag_service = RAGService(retriever, generator)
         self.client = client
         self.generator = generator
 

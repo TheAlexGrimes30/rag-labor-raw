@@ -70,16 +70,12 @@ class VectorStore:
         points: List[PointStruct] = []
 
         for i, v, p in zip(ids, vectors, payloads):
-
-            if v is None or len(v) != self.vector_size:
+            if not v or len(v) != self.vector_size:
                 continue
 
-            safe_payload = p or {}
+            safe_payload = dict(p) if p else {}
 
-            text = safe_payload.get("text", "")
-            if not text and "page_content" in safe_payload:
-                text = safe_payload["page_content"]
-
+            text = safe_payload.get("text") or safe_payload.get("page_content") or ""
             safe_payload["text"] = text
 
             points.append(
