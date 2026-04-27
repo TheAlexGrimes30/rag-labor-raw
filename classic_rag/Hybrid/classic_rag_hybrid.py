@@ -139,14 +139,14 @@ class ClassicRAG:
         self.ingestion = IngestionService(pipeline)
 
         embedder = Embedder(
-            model_name="intfloat/multilingual-e5-base"
+            model_name="Qwen/Qwen3-Embedding-0.6B"
         )
 
         client = QdrantClient(host="localhost", port=6333)
 
         vector_store = VectorStore(
             client=client,
-            collection_name="rag_collection",
+            collection_name="rag_qwen_collection",
             vector_size=embedder.dim
         )
 
