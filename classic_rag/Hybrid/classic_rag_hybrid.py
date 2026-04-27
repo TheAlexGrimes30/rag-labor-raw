@@ -53,13 +53,13 @@ class RAGService:
 
     def ask(self, query: str) -> RAGResponse:
 
-        hits = self.retriever.retrieve(query, top_k=10)
+        hits = self.retriever.retrieve(query, top_k=15)
 
         print("\n--- RETRIEVER RESULTS ---")
-        for h in hits[:5]:
+        for h in hits[:7]:
             print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
 
-        top_hits = hits[:5]
+        top_hits = self._select_hits(hits, query)
 
         context = self._build_context(top_hits)
 
@@ -69,6 +69,39 @@ class RAGService:
             answer=answer,
             sources=[h.payload for h in top_hits]
         )
+
+    def _select_hits(self, hits: List[SearchResult], query: str) -> List[SearchResult]:
+
+        selected = []
+        seen = set()
+
+        query_lower = query.lower()
+
+        for h in hits:
+            text = (h.text or "").strip()
+
+            if len(text) < 30:
+                continue
+
+            key = hash(text)
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            if h.payload.get("article_number"):
+                selected.insert(0, h)
+                continue
+
+            if any(word in text.lower() for word in query_lower.split()):
+                selected.append(h)
+            else:
+                selected.append(h)
+
+            if len(selected) >= 7:
+                break
+
+        return selected
 
     def _build_context(self, hits: List[SearchResult]) -> str:
         parts = []
@@ -95,7 +128,7 @@ class RAGService:
 
             parts.append(f"[SOURCE: {src} | {meta_str}]\n{text}")
 
-        return "\n\n---\n\n".join(parts)[:5000]
+        return "\n\n---\n\n".join(parts)[:7000]
 
 class ClassicRAG:
 

@@ -86,8 +86,22 @@ class LaborPromptBuilder(BasePromptBuilder):
         
         ПРАВИЛА:
         - Используй контекст как основной источник
-        - Допускается краткое обобщение
+        - Допускается логический вывод, если нет прямого определения
         - Не добавляй лишнего текста
+        
+        ПРИМЕР:
+        
+        КОНТЕКСТ:
+        Свобода труда означает право свободно распоряжаться своими способностями к труду,
+        выбирать род деятельности и профессию.
+        
+        ВОПРОС:
+        что такое свобода труда
+        
+        Ответ:
+        1. Факт
+        2. Свобода труда — это право свободно распоряжаться своими способностями к труду
+        3. Статья 2 ТК РФ
         
         ЕСЛИ НЕТ ДАННЫХ:
         Ответ:
@@ -123,7 +137,6 @@ class Generator(BaseGenerator):
             return "Факт\nВ предоставленном контексте отсутствует информация\n-"
 
         prompt = self.prompt_builder.build(query, context)
-
         raw = self.llm.generate(prompt)
 
         return self._postprocess(raw)
@@ -132,14 +145,9 @@ class Generator(BaseGenerator):
         text = text.replace("КОНЕЦ_ОТВЕТА", "").strip()
 
         lines = [l.strip() for l in text.split("\n") if l.strip()]
+        unique_lines = list(dict.fromkeys(lines))
 
-        cleaned = []
-        for l in lines:
-            if l not in cleaned:
-                cleaned.append(l)
+        if len(unique_lines) < 3:
+            unique_lines += ["-"] * (3 - len(unique_lines))
 
-        if len(cleaned) < 3:
-            cleaned += ["-"] * (3 - len(cleaned))
-
-        return "\n".join(cleaned[:5])
-
+        return "\n".join(unique_lines[:5])
