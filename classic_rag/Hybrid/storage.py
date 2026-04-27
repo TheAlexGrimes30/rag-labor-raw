@@ -69,12 +69,14 @@ class VectorStore:
 
         points: List[PointStruct] = []
 
-        for i, v, p in zip(ids, vectors, payloads, strict=True):
+        for i, v, p in zip(ids, vectors, payloads):
+            if not v or len(v) != self.vector_size:
+                continue
 
             safe_payload = dict(p) if p else {}
 
-            if "text" not in safe_payload:
-                safe_payload["text"] = ""
+            text = safe_payload.get("text") or safe_payload.get("page_content") or ""
+            safe_payload["text"] = text
 
             points.append(
                 PointStruct(
@@ -83,6 +85,9 @@ class VectorStore:
                     payload=safe_payload,
                 )
             )
+
+        if not points:
+            return
 
         self.client.upsert(
             collection_name=self.collection_name,
@@ -123,6 +128,9 @@ class VectorStore:
             чтобы не привязываться жёстко к Qdrant API.
         """
 
+        if not query_vector:
+            return []
+
         result = self.client.query_points(
             collection_name=self.collection_name,
             query=query_vector,
@@ -131,10 +139,10 @@ class VectorStore:
             query_filter=query_filter,
         )
 
-        if not result or not result.points:
+        if not result:
             return []
 
-        return result.points
+        return result.points if hasattr(result, "points") else result
 
     def delete_collection(self) -> None:
         """

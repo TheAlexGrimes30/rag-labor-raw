@@ -138,33 +138,34 @@ class StructureChunker(BaseChunker):
     def split(self, text: str, *, source: str | None = None):
 
         text = self._strip_yaml(text)
-
         text = self._normalize(text)
+
         if not text:
             return []
 
         sections = self._split_sections(text)
-
         all_chunks = []
 
         for section in sections:
+            article_match = self.ARTICLE_PATTERN.search(section)
+            if article_match:
+                all_chunks.append(
+                    Chunk(
+                        text=section.strip(),
+                        payload={
+                            "source": source,
+                            "chunk_type": "article",
+                            "article_number": article_match.group(1)
+                        }
+                    )
+                )
+                continue
 
             matches = list(self.HEADER_PATTERN.finditer(section))
 
             if not matches:
                 if self.fallback:
                     all_chunks.extend(self.fallback.split(section, source=source))
-                    continue
-
-                all_chunks.append(
-                    Chunk(
-                        text=section,
-                        payload={
-                            "source": source,
-                            "chunk_type": "raw"
-                        }
-                    )
-                )
                 continue
 
             for i, match in enumerate(matches):
@@ -182,10 +183,6 @@ class StructureChunker(BaseChunker):
                     "header": header,
                     "level": level,
                 }
-
-                article_match = self.ARTICLE_PATTERN.search(body)
-                if article_match:
-                    payload["article_number"] = article_match.group(1)
 
                 all_chunks.append(
                     Chunk(
