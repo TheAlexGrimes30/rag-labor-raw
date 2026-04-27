@@ -55,14 +55,11 @@ class Reranker(BaseReranker):
             return []
 
         pairs: List[Tuple[str, str]] = [
-            (query, (h.text or "").strip())
+            (query, h.text.strip())
             for h in filtered_hits
         ]
 
         scores = self._predict_batched(pairs)
-
-        if hasattr(scores, "tolist"):
-            scores = scores.tolist()
 
         ranked = sorted(
             zip(filtered_hits, scores),
@@ -80,28 +77,29 @@ class Reranker(BaseReranker):
         pairs: List[Tuple[str, str]]
     ) -> List[float]:
 
-        all_scores: List[float] = []
-
-        for i in range(0, len(pairs), self.batch_size):
-            batch = pairs[i:i + self.batch_size]
-
-            batch = [
-                (str(q), str(doc))
-                for q, doc in batch
-                if q is not None and doc is not None
-            ]
-
-            if not batch:
-                continue
-
-            batch_scores = self._model.predict(
-                batch,
+        try:
+            scores = self._model.predict(
+                pairs,
                 show_progress_bar=False
             )
 
-            if hasattr(batch_scores, "tolist"):
-                batch_scores = batch_scores.tolist()
+        except ValueError as e:
+            if "no padding token" in str(e):
+                print("Model does not support batching → fallback to batch_size=1")
 
-            all_scores.extend(batch_scores)
+                scores = []
+                for q, doc in pairs:
+                    s = self._model.predict(
+                        [(q, doc)],
+                        show_progress_bar=False
+                    )[0]
+                    scores.append(float(s))
 
-        return all_scores
+                return scores
+
+            raise
+
+        if not isinstance(scores, list):
+            scores = scores.tolist()
+
+        return [float(s) for s in scores]
