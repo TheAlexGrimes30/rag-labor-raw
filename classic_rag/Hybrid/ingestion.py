@@ -5,6 +5,8 @@ from typing import List, Tuple, Dict, Any
 import yaml
 from langchain_core.documents import Document
 
+from classic_rag.Hybrid.rag_config import Chunk
+
 
 class BaseDocumentLoader(ABC):
 
@@ -79,13 +81,13 @@ class IngestionPipeline:
         self.loader = loader
         self.chunker = chunker
 
-    def run(self) -> List[Document]:
+    def run(self) -> List[Chunk]:
         docs = self.loader.load()
 
         if not docs:
             return []
 
-        chunks: List[Document] = []
+        chunks: List[Chunk] = []
 
         for doc in docs:
             text = doc.page_content
@@ -101,20 +103,20 @@ class IngestionPipeline:
                 if not ch.text or not ch.text.strip():
                     continue
 
-                metadata = dict(doc.metadata)
-                metadata.update(ch.payload or {})
+                payload = dict(doc.metadata)
+                payload.update(ch.payload or {})
 
-                chunks.append(
-                    Document(
-                        page_content=ch.text.strip(),
-                        metadata=metadata
-                    )
+                new_chunk = Chunk(
+                    text=ch.text.strip(),
+                    payload=payload
                 )
+
+                chunks.append(new_chunk)
 
         return self._clean(chunks)
 
-    def _clean(self, chunks: List[Document]) -> List[Document]:
+    def _clean(self, chunks: List[Chunk]) -> List[Chunk]:
         return [
             c for c in chunks
-            if c.page_content and c.page_content.strip()
+            if c.text and c.text.strip()
         ]

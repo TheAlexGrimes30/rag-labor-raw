@@ -1,15 +1,12 @@
 from pathlib import Path
 from typing import List
 
-import uuid
-
-from langchain_core.documents import Document
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
 from classic_rag.Hybrid.ingestion import MarkdownDocumentLoader, IngestionPipeline
 from classic_rag.Hybrid.rag_chunkers import SentenceChunker, WindowChunker, StructureChunker, SmartChunker
-from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
+from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
 
@@ -17,7 +14,7 @@ class IngestionService:
     def __init__(self, pipeline: IngestionPipeline):
         self.pipeline = pipeline
 
-    def load_chunks(self) -> List[Document]:
+    def load_chunks(self) -> List[Chunk]:
         chunks = self.pipeline.run()
         print(f"[Ingestion] Loaded chunks: {len(chunks)}")
         return chunks
@@ -27,23 +24,23 @@ class IndexService:
         self.vector_store = vector_store
         self.embedder = embedder
 
-    def index(self, chunks: List[Document]):
+    def index(self, chunks: List[Chunk]):
         if not chunks:
             return
 
-        texts = [c.page_content for c in chunks]
+        texts = [c.text for c in chunks]
 
         payloads = []
+        ids = []
+
         for c in chunks:
-            p = dict(c.metadata)
-            p["text"] = c.page_content
+            p = dict(c.payload) if c.payload else {}
+            p["text"] = c.text
             payloads.append(p)
+            ids.append(c.chunk_id)
 
         vectors = self.embedder.encode_passages(texts)
-        ids = [str(uuid.uuid4()) for _ in texts]
-
         self.vector_store.upsert(ids, vectors, payloads)
-
         print(f"[Index] Indexed: {len(chunks)} chunks")
 
 class RAGService:
@@ -205,6 +202,13 @@ class ClassicRAG:
 
         print("Running ingestion...")
         chunks = self.ingestion.load_chunks()
+
+        print(f"\n[DEBUG] Total chunks: {len(chunks)}")
+
+        for i, c in enumerate(chunks[:5]):
+            print(f"\n--- CHUNK {i} ---")
+            print(f"text: {c.text[:200]}")
+            print(f"payload: {c.payload}")
 
         print("Indexing...")
         self.index_service.index(chunks)

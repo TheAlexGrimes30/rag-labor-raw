@@ -2,6 +2,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 
+from qdrant_client.http.models import PointStruct
+
 
 @dataclass
 class RAGResponse:
@@ -26,7 +28,7 @@ class Chunk:
     """
 
     text: str
-    payload: dict[str, Any]
+    payload: Dict[str, Any]
     chunk_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -65,7 +67,7 @@ class SearchResult:
 
     text: str
     score: float
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: Dict[str, Any] = field(default_factory=dict)
     id: str | None = None
     source: str | None = None
 
@@ -77,7 +79,7 @@ class SearchResult:
         self.payload.setdefault("text", self.text)
 
     @classmethod
-    def from_qdrant(cls, point) -> "SearchResult":
+    def from_qdrant(cls, point: PointStruct) -> "SearchResult":
         """
         Создание SearchResult из объекта Qdrant (ScoredPoint).
 
@@ -126,8 +128,8 @@ class QdrantMapper:
     Преобразует результат Qdrant → SearchResult
     """
 
-    @staticmethod
-    def map(point) -> SearchResult:
+    @classmethod
+    def map(cls, point: PointStruct) -> SearchResult:
         payload = getattr(point, "payload", {}) or {}
         raw_id = getattr(point, "id", None)
 
@@ -145,8 +147,9 @@ class BM25Mapper:
     Преобразует результат BM25 → SearchResult
     """
 
-    @staticmethod
+    @classmethod
     def map(
+        cls,
         text: str,
         score: float,
         payload: dict[str, Any] | None = None
@@ -163,8 +166,8 @@ class RerankMapper:
     Преобразует результат после reranking
     """
 
-    @staticmethod
-    def map(base: SearchResult, score: float) -> SearchResult:
+    @classmethod
+    def map(cls, base: SearchResult, score: float) -> SearchResult:
         return SearchResult(
             text=base.text,
             score=float(score),
