@@ -29,18 +29,13 @@ class IndexService:
             return
 
         texts = [c.text for c in chunks]
-
-        payloads = []
-        ids = []
-
-        for c in chunks:
-            p = dict(c.payload) if c.payload else {}
-            p["text"] = c.text
-            payloads.append(p)
-            ids.append(c.chunk_id)
+        payloads = [c.to_payload() for c in chunks]
+        ids = [c.chunk_id for c in chunks]
 
         vectors = self.embedder.encode_passages(texts)
+
         self.vector_store.upsert(ids, vectors, payloads)
+
         print(f"[Index] Indexed: {len(chunks)} chunks")
 
 class RAGService:
@@ -206,9 +201,13 @@ class ClassicRAG:
         print(f"\n[DEBUG] Total chunks: {len(chunks)}")
 
         for i, c in enumerate(chunks[:5]):
+            payload = c.to_payload()
+
             print(f"\n--- CHUNK {i} ---")
             print(f"text: {c.text[:200]}")
-            print(f"payload: {c.payload}")
+            print(f"file: {payload.get('file')}")
+            print(f"article: {payload.get('article_number')}")
+            print(f"header: {payload.get('header')}")
 
         print("Indexing...")
         self.index_service.index(chunks)

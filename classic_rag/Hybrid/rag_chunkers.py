@@ -2,7 +2,7 @@ import re
 from abc import abstractmethod, ABC
 from typing import List
 
-from classic_rag.Hybrid.rag_config import Chunk
+from classic_rag.Hybrid.rag_config import Chunk, ChunkMetadata
 
 
 class BaseChunker(ABC):
@@ -63,10 +63,15 @@ class SentenceChunker(BaseChunker):
                     chunks.append(
                         Chunk(
                             text=chunk_text,
-                            payload={
-                                "source": source,
-                                "chunk_type": "sentence"
-                            }
+                            metadata=ChunkMetadata(
+                                source=source or "",
+                                file="",
+                                chunk_type="sentence",
+                                header=None,
+                                level=None,
+                                article_number=None,
+                                topics=[]
+                            )
                         )
                     )
 
@@ -83,10 +88,15 @@ class SentenceChunker(BaseChunker):
                 chunks.append(
                     Chunk(
                         text=chunk_text,
-                        payload={
-                            "source": source,
-                            "chunk_type": "sentence"
-                        }
+                        metadata=ChunkMetadata(
+                            source=source or "",
+                            file="",
+                            chunk_type="sentence",
+                            header=None,
+                            level=None,
+                            article_number=None,
+                            topics=[]
+                        )
                     )
                 )
 
@@ -116,12 +126,15 @@ class WindowChunker(BaseChunker):
                 chunks.append(
                     Chunk(
                         text=piece,
-                        payload={
-                            "source": source,
-                            "chunk_type": "window",
-                            "start": start,
-                            "end": end,
-                        }
+                        metadata=ChunkMetadata(
+                            source=source or "",
+                            file="",
+                            chunk_type="window",
+                            header=None,
+                            level=None,
+                            article_number=None,
+                            topics=[]
+                        )
                     )
                 )
 
@@ -148,15 +161,20 @@ class StructureChunker(BaseChunker):
 
         for section in sections:
             article_match = self.ARTICLE_PATTERN.search(section)
+
             if article_match:
                 all_chunks.append(
                     Chunk(
                         text=section.strip(),
-                        payload={
-                            "source": source,
-                            "chunk_type": "article",
-                            "article_number": article_match.group(1)
-                        }
+                        metadata=ChunkMetadata(
+                            source=source or "",
+                            file="",
+                            chunk_type="structure",
+                            header=None,
+                            level=None,
+                            article_number=article_match.group(1),
+                            topics=[]
+                        )
                     )
                 )
                 continue
@@ -187,7 +205,15 @@ class StructureChunker(BaseChunker):
                 all_chunks.append(
                     Chunk(
                         text=body,
-                        payload=payload
+                        metadata=ChunkMetadata(
+                            source=source or "",
+                            file="",
+                            chunk_type="structure",
+                            header=header,
+                            level=level,
+                            article_number=None,
+                            topics=[]
+                        )
                     )
                 )
 
@@ -224,22 +250,16 @@ class SmartChunker(BaseChunker):
 
             if sentence_chunks:
                 for sc in sentence_chunks:
-                    sc.payload.update({
-                        "parent_header": chunk.payload.get("header"),
-                        "parent_level": chunk.payload.get("level"),
-                        "parent_type": "structure"
-                    })
+                    sc.metadata.header = chunk.metadata.header
+                    sc.metadata.level = chunk.metadata.level
                     final_chunks.append(sc)
                 continue
 
             window_chunks = self.window.split(chunk.text, source=source)
 
             for wc in window_chunks:
-                wc.payload.update({
-                    "parent_header": chunk.payload.get("header"),
-                    "parent_level": chunk.payload.get("level"),
-                    "parent_type": "structure"
-                })
+                wc.metadata.header = chunk.metadata.header
+                wc.metadata.level = chunk.metadata.level
                 final_chunks.append(wc)
 
         return final_chunks

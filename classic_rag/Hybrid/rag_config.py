@@ -10,6 +10,15 @@ class RAGResponse:
     answer: str
     sources: List[Dict]
 
+@dataclass
+class ChunkMetadata:
+    source: str
+    file: str
+    chunk_type: Literal["structure", "sentence", "window"]
+    header: str | None
+    level: int | None
+    article_number: str | None
+    topics: List[str] = field(default_factory=list)
 
 @dataclass
 class Chunk:
@@ -23,25 +32,34 @@ class Chunk:
 
     Attributes:
         text (str): Текст чанка
-        payload (Dict[str, Any]): Метаданные
+        metadata (ChunkMetadata): Метаданные
         chunk_id (str): Уникальный ID (генерируется автоматически, если не задан)
     """
 
     text: str
-    payload: Dict[str, Any]
+    metadata: ChunkMetadata
     chunk_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.payload is None:
-            self.payload = {}
+        if not self.chunk_id:
+            key = self.metadata.source + self.text[:512]
+            self.chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
-        if self.chunk_id is None:
-            key = self.payload.get("idempotency_key") or self.text[:512]
+    def to_payload(self) -> Dict[str, Any]:
+        """
+        Преобразует metadata → payload для Qdrant
+        """
 
-            self.chunk_id = str(
-                uuid.uuid5(uuid.NAMESPACE_URL, key)
-            )
-
+        return {
+            "text": self.text,
+            "source": self.metadata.source,
+            "file": self.metadata.file,
+            "chunk_type": self.metadata.chunk_type,
+            "header": self.metadata.header,
+            "level": self.metadata.level,
+            "article_number": self.metadata.article_number,
+            "topics": self.metadata.topics,
+        }
 
 @dataclass
 class SearchResult:
@@ -93,7 +111,7 @@ class SearchResult:
         return QdrantMapper.map(point)
 
     @classmethod
-    def from_bm25(cls, text: str, score: float, payload: dict[str, Any] | None = None) -> "SearchResult":
+    def from_bm25(cls, text: str, score: float, payload: Dict[str, Any] | None = None) -> "SearchResult":
         """
         Создание результата из BM25.
 
@@ -131,13 +149,12 @@ class QdrantMapper:
     @classmethod
     def map(cls, point: PointStruct) -> SearchResult:
         payload = getattr(point, "payload", {}) or {}
-        raw_id = getattr(point, "id", None)
 
         return SearchResult(
             text=str(payload.get("text", "")),
-            score=float(getattr(point, "score", 0.0)),
+            score=float(point.score),
             payload=payload,
-            id=str(raw_id) if raw_id is not None else None,
+            id=str(point.id) if point.id else None,
             source="qdrant",
         )
 
@@ -152,7 +169,7 @@ class BM25Mapper:
         cls,
         text: str,
         score: float,
-        payload: dict[str, Any] | None = None
+        payload: Dict[str, Any] | None = None
     ) -> SearchResult:
         return SearchResult(
             text=text or "",
@@ -176,16 +193,3 @@ class RerankMapper:
             source=f"{base.source}+reranker" if base.source else "reranker",
         )
 
-@dataclass
-class ChunkMetadata:
-    source: str
-    file: str
-
-    chunk_type: Literal["structure", "sentence", "window"]
-
-    header: str | None
-    level: int | None
-    article_number: str | None
-
-    topics: list[str]
-    
