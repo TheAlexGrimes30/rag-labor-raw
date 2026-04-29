@@ -3,7 +3,7 @@ import re
 from abc import abstractmethod, ABC
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
@@ -237,6 +237,7 @@ class BM25Retriever(BaseSparseRetriever):
     def __init__(self):
         self._bm25: Optional[BM25Okapi] = None
         self._corpus: Optional[List[str]] = None
+        self._index_map = {}
 
     def build(self, corpus: List[str]) -> None:
         """
@@ -249,6 +250,7 @@ class BM25Retriever(BaseSparseRetriever):
         tokenized = [self._tokenize(t) for t in corpus]
         self._bm25 = BM25Okapi(tokenized)
         self._corpus = corpus
+        self._index_map = {t: i for i, t in enumerate(corpus)}
 
     def search(self, query: str, corpus: List[str], k: int) -> List[float]:
         """
@@ -266,9 +268,7 @@ class BM25Retriever(BaseSparseRetriever):
         if self._bm25 is None or self._corpus != corpus:
             self.build(corpus)
 
-        tokens = self._tokenize(query)
-        scores = self._bm25.get_scores(tokens)
-
+        scores = self._bm25.get_scores(self._tokenize(query))
         return self._minmax(scores)
 
     def _tokenize(self, text: str) -> List[str]:
@@ -366,7 +366,7 @@ class AlphaFusion(BaseFusion):
             return []
 
         if len(sparse_scores) < len(dense):
-            sparse_scores = sparse_scores + [0.0] * (len(dense) - len(sparse_scores))
+            sparse_scores += [0.0] * (len(dense) - len(sparse_scores))
 
         dense_scores = self._minmax([d.score for d in dense])
 
@@ -379,7 +379,8 @@ class AlphaFusion(BaseFusion):
             if score < self.min_score:
                 continue
 
-            key = hashlib.md5((doc.text or "").encode()).hexdigest()
+            text = doc.text or ""
+            key = hashlib.md5(text.encode()).hexdigest()
 
             if key in seen:
                 continue
@@ -388,7 +389,7 @@ class AlphaFusion(BaseFusion):
 
             fused.append(
                 SearchResult(
-                    text=doc.text,
+                    text=text,
                     score=score,
                     payload=doc.payload,
                     id=doc.id,
@@ -410,6 +411,7 @@ class AlphaFusion(BaseFusion):
         """
 
         mn, mx = min(values), max(values)
+
         if abs(mx - mn) < 1e-8:
             return [0.0] * len(values)
         return [(v - mn) / (mx - mn) for v in values]
@@ -433,18 +435,16 @@ class Retriever:
         self,
         vector_store: VectorStore,
         embedder: Embedder,
-        dense: BaseDenseRetriever | None = None,
-        sparse: BaseSparseRetriever | None = None,
-        fusion: BaseFusion | None = None,
     ):
         self.vector_store = vector_store
         self.embedder = embedder
 
-        self.dense = dense or QdrantDenseRetriever(vector_store)
-        self.sparse = sparse or BM25Retriever()
-        self.fusion = fusion or AlphaFusion()
+        self.dense = QdrantDenseRetriever(vector_store)
+        self.sparse = BM25Retriever()
+        self.fusion = AlphaFusion()
 
         self._corpus: List[str] = []
+        self._id_map: Dict[str, int] = {}
         self._is_built = False
 
     def build_corpus(self):
@@ -463,12 +463,23 @@ class Retriever:
             with_vectors=False
         )
 
-        self._corpus = [
-            (p.payload or {}).get("text", "").strip()
-            for p in points
-        ]
+        corpus = []
+        id_map = {}
 
-        self._corpus = [t for t in self._corpus if t]
+        for p in points:
+            payload = p.payload or {}
+            text = (payload.get("text") or "").strip()
+
+            if not text:
+                continue
+
+            idx = len(corpus)
+            corpus.append(text)
+
+            id_map[str(p.id)] = idx
+
+        self._corpus = corpus
+        self._id_map = id_map
 
         self.sparse.build(self._corpus)
         self._is_built = True
@@ -494,31 +505,24 @@ class Retriever:
 
         self.build_corpus()
 
-        query_vec = self.embedder.encode_queries([query or ""])[0]
-        dense_hits = self.dense.search(query_vec, k=top_k * 5)
+        query_vec = self.embedder.encode_queries([query])[0]
+
+        dense_hits = self.dense.search(query_vec, k=top_k * 8)
 
         if not dense_hits:
             return []
 
-        sparse_scores = self.sparse.search(
-            query or "",
-            self._corpus,
-            k=len(self._corpus)
-        )
+        sparse_scores = self.sparse.search(query, self._corpus, k=len(self._corpus))
 
-        sparse_map = {
-            self._corpus[i]: sparse_scores[i]
-            for i in range(len(self._corpus))
-        }
+        aligned_sparse = []
 
-        aligned_sparse = [
-            sparse_map.get((d.text or "").strip(), 0.0)
-            for d in dense_hits
-        ]
+        for d in dense_hits:
+            idx = self._id_map.get(d.id)
+            aligned_sparse.append(sparse_scores[idx] if idx is not None else 0.0)
 
         fused = self.fusion.fuse(dense_hits, aligned_sparse)
 
         return [
                    f for f in fused
-                   if f.text and len(f.text.strip()) > 20
+                   if f.text and len(f.text) > 30
                ][:top_k]

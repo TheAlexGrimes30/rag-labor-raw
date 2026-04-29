@@ -17,11 +17,13 @@ class BasePromptBuilder(ABC):
     def build(self, query: str, context: str) -> str:
         raise NotImplementedError
 
+
 class BaseContextCleaner(ABC):
 
     @abstractmethod
     def clean_context(self, text: str) -> str:
         raise NotImplementedError
+
 
 class BaseGenerator(ABC):
 
@@ -29,12 +31,14 @@ class BaseGenerator(ABC):
     def generate(self, query: str, context: str) -> str:
         raise NotImplementedError
 
+
 class ContextCleaner(BaseContextCleaner):
 
     def clean_context(self, text: str) -> str:
         text = re.sub(r"#+", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
+
 
 class QwenClient(BaseLLMClient):
 
@@ -44,7 +48,7 @@ class QwenClient(BaseLLMClient):
             n_ctx=4096,
             n_threads=8,
             top_p=0.9,
-            repeat_penalty=1.1,
+            repeat_penalty=1.2,
             temperature=0.1
         )
 
@@ -70,61 +74,70 @@ class QwenClient(BaseLLMClient):
                 pass
             self.llm = None
 
+
 class LaborPromptBuilder(BasePromptBuilder):
 
     def build(self, query: str, context: str) -> str:
         return f"""
-        Ты — эксперт по трудовому праву РФ.
-        
-        Задача: ответить на вопрос на основе контекста.
-        
+        Ты — эксперт по трудовому праву Российской Федерации.
+
+        Твоя задача — дать ТОЧНЫЙ и ПОЛНЫЙ ответ строго на основе контекста.
+
+        КРИТИЧЕСКИЕ ПРАВИЛА:
+        - НЕ сокращай формулировки закона
+        - ЕСЛИ в контексте есть список — ОБЯЗАТЕЛЬНО приведи его полностью
+        - НЕ обобщай (нельзя писать "и другие")
+        - Используй формулировки максимально близкие к тексту закона
+        - Если есть несколько пунктов — оформи их списком
+
         ФОРМАТ:
         Ответ:
-        1. Да / Нет / Частично / Факт
-        2. Краткое обоснование
-        3. Статья ТК РФ или "-"
-        
-        ПРАВИЛА:
-        - Используй контекст как основной источник
-        - Допускается логический вывод, если нет прямого определения
-        - Не добавляй лишнего текста
-        
+        <полный развёрнутый ответ>
+
+        Источник:
+        <статья ТК РФ или "-">
+
+        =====================
         ПРИМЕР:
-        
+
         КОНТЕКСТ:
-        Свобода труда означает право свободно распоряжаться своими способностями к труду,
-        выбирать род деятельности и профессию.
-        
+        Сферы правового регулирования:
+        Трудовое законодательство регулирует отношения, связанные с:
+        - организацией труда
+        - управлением трудом
+        - трудоустройством у данного работодателя
+
         ВОПРОС:
-        что такое свобода труда
-        
+        что регулирует трудовое законодательство
+
         Ответ:
-        1. Факт
-        2. Свобода труда — это право свободно распоряжаться своими способностями к труду
-        3. Статья 2 ТК РФ
-        
-        ЕСЛИ НЕТ ДАННЫХ:
-        Ответ:
-        Факт
-        В предоставленном контексте отсутствует информация
-        -
-        
+        Трудовое законодательство регулирует отношения, связанные с:
+        - организацией труда
+        - управлением трудом
+        - трудоустройством у данного работодателя
+
+        Источник:
+        Статья 1 ТК РФ
+
+        =====================
+
         КОНТЕКСТ:
         {context}
-        
+
         ВОПРОС:
         {query}
-        
+
         КОНЕЦ_ОТВЕТА
         """.strip()
+
 
 class Generator(BaseGenerator):
 
     def __init__(
-        self,
-        llm: BaseLLMClient,
-        prompt_builder: BasePromptBuilder,
-        cleaner: BaseContextCleaner
+            self,
+            llm: BaseLLMClient,
+            prompt_builder: BasePromptBuilder,
+            cleaner: BaseContextCleaner
     ):
         self.llm = llm
         self.prompt_builder = prompt_builder
@@ -144,10 +157,6 @@ class Generator(BaseGenerator):
     def _postprocess(self, text: str) -> str:
         text = text.replace("КОНЕЦ_ОТВЕТА", "").strip()
 
-        lines = [l.strip() for l in text.split("\n") if l.strip()]
-        unique_lines = list(dict.fromkeys(lines))
+        text = re.sub(r"\n{3,}", "\n\n", text)
 
-        if len(unique_lines) < 3:
-            unique_lines += ["-"] * (3 - len(unique_lines))
-
-        return "\n".join(unique_lines[:5])
+        return text.strip()

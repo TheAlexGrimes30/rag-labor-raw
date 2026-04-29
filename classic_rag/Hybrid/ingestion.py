@@ -5,6 +5,8 @@ from typing import List, Tuple, Dict, Any
 import yaml
 from langchain_core.documents import Document
 
+from classic_rag.Hybrid.rag_config import Chunk, ChunkMetadata
+
 
 class BaseDocumentLoader(ABC):
 
@@ -13,6 +15,7 @@ class BaseDocumentLoader(ABC):
         raise NotImplementedError
 
 class MarkdownDocumentLoader(BaseDocumentLoader):
+
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
 
@@ -79,42 +82,44 @@ class IngestionPipeline:
         self.loader = loader
         self.chunker = chunker
 
-    def run(self) -> List[Document]:
+    def run(self) -> List[Chunk]:
         docs = self.loader.load()
 
         if not docs:
             return []
 
-        chunks: List[Document] = []
+        chunks: List[Chunk] = []
 
         for doc in docs:
-            text = doc.page_content
+            text = (doc.page_content or "").strip()
 
-            source = doc.metadata.get("source")
-
-            if not text or not text.strip():
+            if not text:
                 continue
+
+            source = doc.metadata.get("source", "")
+            file = doc.metadata.get("file", "")
+            topics = doc.metadata.get("topics", [])
 
             chunked = self.chunker.split(text, source=source)
 
             for ch in chunked:
-                if not ch.text or not ch.text.strip():
-                    continue
 
-                metadata = dict(doc.metadata)
-                metadata.update(ch.payload or {})
+                meta = ChunkMetadata(
+                    source=source,
+                    file=file,
+                    chunk_type=ch.metadata.chunk_type,
+                    header=ch.metadata.header,
+                    level=ch.metadata.level,
+                    article_number=ch.metadata.article_number,
+                    topics=topics,
+                )
 
                 chunks.append(
-                    Document(
-                        page_content=ch.text.strip(),
-                        metadata=metadata
+                    Chunk(
+                        text=ch.text.strip(),
+                        metadata=meta,
+                        chunk_id=ch.chunk_id
                     )
                 )
 
-        return self._clean(chunks)
-
-    def _clean(self, chunks: List[Document]) -> List[Document]:
-        return [
-            c for c in chunks
-            if c.page_content and c.page_content.strip()
-        ]
+        return [c for c in chunks if c.text.strip()]

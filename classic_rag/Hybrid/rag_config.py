@@ -1,6 +1,8 @@
 import uuid
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Literal
+
+from qdrant_client.http.models import PointStruct
 
 
 @dataclass
@@ -8,6 +10,15 @@ class RAGResponse:
     answer: str
     sources: List[Dict]
 
+@dataclass
+class ChunkMetadata:
+    source: str
+    file: str
+    chunk_type: Literal["structure", "sentence", "window"]
+    header: str | None
+    level: int | None
+    article_number: str | None
+    topics: List[str] = field(default_factory=list)
 
 @dataclass
 class Chunk:
@@ -21,25 +32,34 @@ class Chunk:
 
     Attributes:
         text (str): Текст чанка
-        payload (Dict[str, Any]): Метаданные
+        metadata (ChunkMetadata): Метаданные
         chunk_id (str): Уникальный ID (генерируется автоматически, если не задан)
     """
 
     text: str
-    payload: dict[str, Any]
+    metadata: ChunkMetadata
     chunk_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.payload is None:
-            self.payload = {}
+        if not self.chunk_id:
+            key = self.metadata.source + self.text[:512]
+            self.chunk_id = str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
-        if self.chunk_id is None:
-            key = self.payload.get("idempotency_key") or self.text[:512]
+    def to_payload(self) -> Dict[str, Any]:
+        """
+        Преобразует metadata → payload для Qdrant
+        """
 
-            self.chunk_id = str(
-                uuid.uuid5(uuid.NAMESPACE_URL, key)
-            )
-
+        return {
+            "text": self.text,
+            "source": self.metadata.source,
+            "file": self.metadata.file,
+            "chunk_type": self.metadata.chunk_type,
+            "header": self.metadata.header,
+            "level": self.metadata.level,
+            "article_number": self.metadata.article_number,
+            "topics": self.metadata.topics,
+        }
 
 @dataclass
 class SearchResult:
@@ -65,7 +85,7 @@ class SearchResult:
 
     text: str
     score: float
-    payload: dict[str, Any] = field(default_factory=dict)
+    payload: Dict[str, Any] = field(default_factory=dict)
     id: str | None = None
     source: str | None = None
 
@@ -77,7 +97,7 @@ class SearchResult:
         self.payload.setdefault("text", self.text)
 
     @classmethod
-    def from_qdrant(cls, point) -> "SearchResult":
+    def from_qdrant(cls, point: PointStruct) -> "SearchResult":
         """
         Создание SearchResult из объекта Qdrant (ScoredPoint).
 
@@ -91,7 +111,7 @@ class SearchResult:
         return QdrantMapper.map(point)
 
     @classmethod
-    def from_bm25(cls, text: str, score: float, payload: dict[str, Any] | None = None) -> "SearchResult":
+    def from_bm25(cls, text: str, score: float, payload: Dict[str, Any] | None = None) -> "SearchResult":
         """
         Создание результата из BM25.
 
@@ -126,16 +146,15 @@ class QdrantMapper:
     Преобразует результат Qdrant → SearchResult
     """
 
-    @staticmethod
-    def map(point) -> SearchResult:
+    @classmethod
+    def map(cls, point: PointStruct) -> SearchResult:
         payload = getattr(point, "payload", {}) or {}
-        raw_id = getattr(point, "id", None)
 
         return SearchResult(
             text=str(payload.get("text", "")),
-            score=float(getattr(point, "score", 0.0)),
+            score=float(point.score),
             payload=payload,
-            id=str(raw_id) if raw_id is not None else None,
+            id=str(point.id) if point.id else None,
             source="qdrant",
         )
 
@@ -145,11 +164,12 @@ class BM25Mapper:
     Преобразует результат BM25 → SearchResult
     """
 
-    @staticmethod
+    @classmethod
     def map(
+        cls,
         text: str,
         score: float,
-        payload: dict[str, Any] | None = None
+        payload: Dict[str, Any] | None = None
     ) -> SearchResult:
         return SearchResult(
             text=text or "",
@@ -163,8 +183,8 @@ class RerankMapper:
     Преобразует результат после reranking
     """
 
-    @staticmethod
-    def map(base: SearchResult, score: float) -> SearchResult:
+    @classmethod
+    def map(cls, base: SearchResult, score: float) -> SearchResult:
         return SearchResult(
             text=base.text,
             score=float(score),
@@ -172,3 +192,4 @@ class RerankMapper:
             id=base.id,
             source=f"{base.source}+reranker" if base.source else "reranker",
         )
+

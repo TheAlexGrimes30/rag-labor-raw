@@ -1,15 +1,12 @@
 from pathlib import Path
 from typing import List
 
-import uuid
-
-from langchain_core.documents import Document
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
 from classic_rag.Hybrid.ingestion import MarkdownDocumentLoader, IngestionPipeline
 from classic_rag.Hybrid.rag_chunkers import SentenceChunker, WindowChunker, StructureChunker, SmartChunker
-from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
+from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
 
@@ -17,7 +14,7 @@ class IngestionService:
     def __init__(self, pipeline: IngestionPipeline):
         self.pipeline = pipeline
 
-    def load_chunks(self) -> List[Document]:
+    def load_chunks(self) -> List[Chunk]:
         chunks = self.pipeline.run()
         print(f"[Ingestion] Loaded chunks: {len(chunks)}")
         return chunks
@@ -27,20 +24,15 @@ class IndexService:
         self.vector_store = vector_store
         self.embedder = embedder
 
-    def index(self, chunks: List[Document]):
+    def index(self, chunks: List[Chunk]) -> None:
         if not chunks:
             return
 
-        texts = [c.page_content for c in chunks]
-
-        payloads = []
-        for c in chunks:
-            p = dict(c.metadata)
-            p["text"] = c.page_content
-            payloads.append(p)
+        texts = [c.text for c in chunks]
+        payloads = [c.to_payload() for c in chunks]
+        ids = [c.chunk_id for c in chunks]
 
         vectors = self.embedder.encode_passages(texts)
-        ids = [str(uuid.uuid4()) for _ in texts]
 
         self.vector_store.upsert(ids, vectors, payloads)
 
@@ -76,11 +68,12 @@ class RAGService:
         seen = set()
 
         query_lower = query.lower()
+        query_words = query_lower.split()
 
         for h in hits:
             text = (h.text or "").strip()
 
-            if len(text) < 30:
+            if len(text) < 40:
                 continue
 
             key = hash(text)
@@ -89,16 +82,22 @@ class RAGService:
 
             seen.add(key)
 
+            header = (h.payload.get("header") or "").lower()
+
             if h.payload.get("article_number"):
                 selected.insert(0, h)
                 continue
 
-            if any(word in text.lower() for word in query_lower.split()):
+            if any(word in header for word in query_words):
+                selected.insert(0, h)
+                continue
+
+            if any(word in text.lower() for word in query_words):
                 selected.append(h)
             else:
                 selected.append(h)
 
-            if len(selected) >= 7:
+            if len(selected) >= 8:
                 break
 
         return selected
@@ -106,13 +105,12 @@ class RAGService:
     def _build_context(self, hits: List[SearchResult]) -> str:
         parts = []
 
-        for h in hits:
+        for i, h in enumerate(hits[:6]):
             text = (h.text or "").strip()
 
-            if len(text) < 30:
+            if len(text) < 40:
                 continue
 
-            src = h.payload.get("file", "unknown")
             article = h.payload.get("article_number")
             header = h.payload.get("header")
 
@@ -126,9 +124,13 @@ class RAGService:
 
             meta_str = " | ".join(meta)
 
-            parts.append(f"[SOURCE: {src} | {meta_str}]\n{text}")
+            parts.append(f"""
+    ФРАГМЕНТ {i + 1}
+    {meta_str}
+    {text}
+    """.strip())
 
-        return "\n\n---\n\n".join(parts)[:7000]
+        return "\n\n".join(parts)
 
 class ClassicRAG:
 
@@ -205,6 +207,17 @@ class ClassicRAG:
 
         print("Running ingestion...")
         chunks = self.ingestion.load_chunks()
+
+        print(f"\n[DEBUG] Total chunks: {len(chunks)}")
+
+        for i, c in enumerate(chunks[:5]):
+            payload = c.to_payload()
+
+            print(f"\n--- CHUNK {i} ---")
+            print(f"text: {c.text[:200]}")
+            print(f"file: {payload.get('file')}")
+            print(f"article: {payload.get('article_number')}")
+            print(f"header: {payload.get('header')}")
 
         print("Indexing...")
         self.index_service.index(chunks)
