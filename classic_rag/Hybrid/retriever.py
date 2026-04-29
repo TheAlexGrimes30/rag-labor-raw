@@ -507,7 +507,8 @@ class Retriever:
 
         query_vec = self.embedder.encode_queries([query])[0]
 
-        dense_hits = self.dense.search(query_vec, k=top_k * 5)
+        dense_hits = self.dense.search(query_vec, k=top_k * 8)
+
         if not dense_hits:
             return []
 
@@ -523,5 +524,5 @@ class Retriever:
 
         return [
                    f for f in fused
-                   if f.text and len(f.text) > 20
+                   if f.text and len(f.text) > 30
                ][:top_k]

@@ -24,7 +24,7 @@ class IndexService:
         self.vector_store = vector_store
         self.embedder = embedder
 
-    def index(self, chunks: List[Chunk]):
+    def index(self, chunks: List[Chunk]) -> None:
         if not chunks:
             return
 
@@ -68,11 +68,12 @@ class RAGService:
         seen = set()
 
         query_lower = query.lower()
+        query_words = query_lower.split()
 
         for h in hits:
             text = (h.text or "").strip()
 
-            if len(text) < 30:
+            if len(text) < 40:
                 continue
 
             key = hash(text)
@@ -81,16 +82,22 @@ class RAGService:
 
             seen.add(key)
 
+            header = (h.payload.get("header") or "").lower()
+
             if h.payload.get("article_number"):
                 selected.insert(0, h)
                 continue
 
-            if any(word in text.lower() for word in query_lower.split()):
+            if any(word in header for word in query_words):
+                selected.insert(0, h)
+                continue
+
+            if any(word in text.lower() for word in query_words):
                 selected.append(h)
             else:
                 selected.append(h)
 
-            if len(selected) >= 7:
+            if len(selected) >= 8:
                 break
 
         return selected
@@ -98,13 +105,12 @@ class RAGService:
     def _build_context(self, hits: List[SearchResult]) -> str:
         parts = []
 
-        for h in hits:
+        for i, h in enumerate(hits[:6]):
             text = (h.text or "").strip()
 
-            if len(text) < 30:
+            if len(text) < 40:
                 continue
 
-            src = h.payload.get("file", "unknown")
             article = h.payload.get("article_number")
             header = h.payload.get("header")
 
@@ -118,9 +124,13 @@ class RAGService:
 
             meta_str = " | ".join(meta)
 
-            parts.append(f"[SOURCE: {src} | {meta_str}]\n{text}")
+            parts.append(f"""
+    ФРАГМЕНТ {i + 1}
+    {meta_str}
+    {text}
+    """.strip())
 
-        return "\n\n---\n\n".join(parts)[:7000]
+        return "\n\n".join(parts)
 
 class ClassicRAG:
 
