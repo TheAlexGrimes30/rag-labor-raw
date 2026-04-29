@@ -1,6 +1,6 @@
 import uuid
 from dataclasses import dataclass, field
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Literal
 
 from qdrant_client.http.models import PointStruct
 
@@ -175,3 +175,17 @@ class RerankMapper:
             id=base.id,
             source=f"{base.source}+reranker" if base.source else "reranker",
         )
+
+@dataclass
+class ChunkMetadata:
+    source: str
+    file: str
+
+    chunk_type: Literal["structure", "sentence", "window"]
+
+    header: str | None
+    level: int | None
+    article_number: str | None
+
+    topics: list[str]
+    
