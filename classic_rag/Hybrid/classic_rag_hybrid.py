@@ -1,3 +1,5 @@
+import re
+from collections import defaultdict
 from pathlib import Path
 from typing import List
 
@@ -103,13 +105,24 @@ class RAGService:
         return selected
 
     def _build_context(self, hits: List[SearchResult]) -> str:
+
+        def clean(text: str) -> str:
+            return re.sub(r"\s+", " ", (text or "")).strip()
+
         parts = []
 
+        seen = set()
+
         for i, h in enumerate(hits[:6]):
-            text = (h.text or "").strip()
+
+            text = clean(h.text)
 
             if len(text) < 40:
                 continue
+
+            if text in seen:
+                continue
+            seen.add(text)
 
             article = h.payload.get("article_number")
             header = h.payload.get("header")
@@ -124,13 +137,15 @@ class RAGService:
 
             meta_str = " | ".join(meta)
 
-            parts.append(f"""
-    ФРАГМЕНТ {i + 1}
+            block = f"""ФРАГМЕНТ {i + 1}
     {meta_str}
-    {text}
-    """.strip())
 
-        return "\n\n".join(parts)
+    {text}
+    """.strip()
+
+            parts.append(block)
+
+        return "\n\n---\n\n".join(parts)
 
 class ClassicRAG:
 
