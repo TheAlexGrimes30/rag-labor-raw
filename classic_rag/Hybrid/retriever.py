@@ -1,4 +1,3 @@
-import hashlib
 import re
 from abc import abstractmethod, ABC
 from dataclasses import dataclass
@@ -237,7 +236,6 @@ class BM25Retriever(BaseSparseRetriever):
     def __init__(self):
         self._bm25: Optional[BM25Okapi] = None
         self._corpus: Optional[List[str]] = None
-        self._index_map = {}
 
     def build(self, corpus: List[str]) -> None:
         """
@@ -250,7 +248,6 @@ class BM25Retriever(BaseSparseRetriever):
         tokenized = [self._tokenize(t) for t in corpus]
         self._bm25 = BM25Okapi(tokenized)
         self._corpus = corpus
-        self._index_map = {t: i for i, t in enumerate(corpus)}
 
     def search(self, query: str, corpus: List[str], k: int) -> List[float]:
         """
@@ -374,14 +371,13 @@ class AlphaFusion(BaseFusion):
         seen = set()
 
         for i, doc in enumerate(dense):
+
             score = self.alpha * dense_scores[i] + (1 - self.alpha) * sparse_scores[i]
 
             if score < self.min_score:
                 continue
 
-            text = doc.text or ""
-            key = hashlib.md5(text.encode()).hexdigest()
-
+            key = hash(doc.text or "")
             if key in seen:
                 continue
 
@@ -389,7 +385,7 @@ class AlphaFusion(BaseFusion):
 
             fused.append(
                 SearchResult(
-                    text=text,
+                    text=doc.text,
                     score=score,
                     payload=doc.payload,
                     id=doc.id,
@@ -506,8 +502,7 @@ class Retriever:
         self.build_corpus()
 
         query_vec = self.embedder.encode_queries([query])[0]
-
-        dense_hits = self.dense.search(query_vec, k=top_k * 8)
+        dense_hits = self.dense.search(query_vec, k=top_k * 3)
 
         if not dense_hits:
             return []
@@ -515,14 +510,10 @@ class Retriever:
         sparse_scores = self.sparse.search(query, self._corpus, k=len(self._corpus))
 
         aligned_sparse = []
-
         for d in dense_hits:
-            idx = self._id_map.get(d.id)
+            idx = self._id_map.get(str(d.id))
             aligned_sparse.append(sparse_scores[idx] if idx is not None else 0.0)
 
         fused = self.fusion.fuse(dense_hits, aligned_sparse)
 
-        return [
-                   f for f in fused
-                   if f.text and len(f.text) > 30
-               ][:top_k]
+        return fused[:top_k]

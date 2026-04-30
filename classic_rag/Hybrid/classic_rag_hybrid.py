@@ -1,5 +1,3 @@
-import re
-from collections import defaultdict
 from pathlib import Path
 from typing import List
 
@@ -9,6 +7,7 @@ from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuild
 from classic_rag.Hybrid.ingestion import MarkdownDocumentLoader, IngestionPipeline
 from classic_rag.Hybrid.rag_chunkers import SentenceChunker, WindowChunker, StructureChunker, SmartChunker
 from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
+from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
 
@@ -41,111 +40,88 @@ class IndexService:
         print(f"[Index] Indexed: {len(chunks)} chunks")
 
 class RAGService:
-    def __init__(self, retriever: Retriever, generator: Generator):
+
+    def __init__(self, retriever, reranker, generator):
         self.retriever = retriever
+        self.reranker = reranker
         self.generator = generator
 
     def ask(self, query: str) -> RAGResponse:
 
-        hits = self.retriever.retrieve(query, top_k=20)
+        hits = self.retriever.retrieve(query, top_k=25)
 
-        print("\n--- RETRIEVER RESULTS ---")
+        hits = self._deduplicate(hits)
+
+        print("\n--- RETRIEVER ---")
         for h in hits[:10]:
-            print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
+            print(f"[{h.score:.4f}] {h.text[:80]}...")
 
-        top_hits = self._select_hits(hits, query)
+        reranked = self.reranker.rerank(
+            query=query,
+            hits=hits,
+            top_n=6
+        )
 
-        context = self._build_context(top_hits)
+        print("\n--- RERANKED ---")
+        for h in reranked:
+            print(f"[{h.score:.4f}] {h.text[:80]}...")
+
+        context = self._build_context(reranked)
 
         answer = self.generator.generate(query, context)
 
         return RAGResponse(
             answer=answer,
-            sources=[h.payload for h in top_hits]
+            sources=[h.payload for h in reranked]
         )
 
-    def _select_hits(self, hits: List[SearchResult], query: str) -> List[SearchResult]:
+    def _build_context(self, hits: List[SearchResult]) -> str:
 
-        selected = []
+        grouped = {}
+
+        for h in hits:
+            article = h.payload.get("article_number") or "unknown"
+            grouped.setdefault(article, []).append(h)
+
+        parts = []
+
+        for article, items in grouped.items():
+
+            block = [f"СТАТЬЯ {article}"]
+
+            for h in items:
+                header = h.payload.get("header") or ""
+                text = (h.text or "").strip()
+
+                if len(text) < 30:
+                    continue
+
+                block.append(f"### {header}\n{text}")
+
+            parts.append("\n\n".join(block))
+
+        return "\n\n---\n\n".join(parts)
+
+    def _deduplicate(self, hits: List[SearchResult]) -> List[SearchResult]:
+
         seen = set()
-
-        query_lower = query.lower()
-        query_words = query_lower.split()
+        result = []
 
         for h in hits:
             text = (h.text or "").strip()
 
-            if len(text) < 40:
+            if len(text) < 30:
                 continue
 
-            key = hash(text)
+            key = hash(text[:200])
+
             if key in seen:
                 continue
 
             seen.add(key)
+            result.append(h)
 
-            header = (h.payload.get("header") or "").lower()
-
-            if h.payload.get("article_number"):
-                selected.insert(0, h)
-                continue
-
-            if any(word in header for word in query_words):
-                selected.insert(0, h)
-                continue
-
-            if any(word in text.lower() for word in query_words):
-                selected.append(h)
-            else:
-                selected.append(h)
-
-            if len(selected) >= 8:
-                break
-
-        return selected
-
-    def _build_context(self, hits: List[SearchResult]) -> str:
-
-        def clean(text: str) -> str:
-            return re.sub(r"\s+", " ", (text or "")).strip()
-
-        parts = []
-
-        seen = set()
-
-        for i, h in enumerate(hits[:6]):
-
-            text = clean(h.text)
-
-            if len(text) < 40:
-                continue
-
-            if text in seen:
-                continue
-            seen.add(text)
-
-            article = h.payload.get("article_number")
-            header = h.payload.get("header")
-
-            meta = []
-
-            if article:
-                meta.append(f"Статья {article} ТК РФ")
-
-            if header:
-                meta.append(header)
-
-            meta_str = " | ".join(meta)
-
-            block = f"""ФРАГМЕНТ {i + 1}
-    {meta_str}
-
-    {text}
-    """.strip()
-
-            parts.append(block)
-
-        return "\n\n---\n\n".join(parts)
+        return result
 
 class ClassicRAG:
 
@@ -216,7 +192,8 @@ class ClassicRAG:
             cleaner=ContextCleaner()
         )
 
-        self.rag_service = RAGService(retriever, generator)
+        reranker = Reranker()
+        self.rag_service = RAGService(retriever, reranker, generator)
         self.client = client
         self.generator = generator
 
