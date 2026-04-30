@@ -45,10 +45,10 @@ class RAGService:
 
     def ask(self, query: str) -> RAGResponse:
 
-        hits = self.retriever.retrieve(query, top_k=15)
+        hits = self.retriever.retrieve(query, top_k=20)
 
         print("\n--- RETRIEVER RESULTS ---")
-        for h in hits[:7]:
+        for h in hits[:10]:
             print(f"[{h.score:.4f}] ({h.source}) {h.text[:80]}...")
 
         top_hits = self._select_hits(hits, query)
@@ -209,6 +209,9 @@ class ClassicRAG:
         chunks = self.ingestion.load_chunks()
 
         print(f"\n[DEBUG] Total chunks: {len(chunks)}")
+
+        for c in chunks[:20]:
+            print(c.metadata.article_number, "|", c.metadata.header)
 
         for i, c in enumerate(chunks[:5]):
             payload = c.to_payload()

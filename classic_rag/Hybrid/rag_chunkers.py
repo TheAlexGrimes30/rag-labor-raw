@@ -159,31 +159,25 @@ class StructureChunker(BaseChunker):
         sections = self._split_sections(text)
         all_chunks = []
 
+        current_article = None
+
         for section in sections:
+
             article_match = self.ARTICLE_PATTERN.search(section)
 
             if article_match:
-                all_chunks.append(
-                    Chunk(
-                        text=section.strip(),
-                        metadata=ChunkMetadata(
-                            source=source or "",
-                            file="",
-                            chunk_type="structure",
-                            header=None,
-                            level=None,
-                            article_number=article_match.group(1),
-                            topics=[]
-                        )
-                    )
-                )
-                continue
+                current_article = article_match.group(1)
 
             matches = list(self.HEADER_PATTERN.finditer(section))
 
             if not matches:
                 if self.fallback:
-                    all_chunks.extend(self.fallback.split(section, source=source))
+                    fallback_chunks = self.fallback.split(section, source=source)
+
+                    for fc in fallback_chunks:
+                        fc.metadata.article_number = current_article
+                        all_chunks.append(fc)
+
                 continue
 
             for i, match in enumerate(matches):
@@ -195,12 +189,8 @@ class StructureChunker(BaseChunker):
 
                 body = section[start:end].strip()
 
-                payload = {
-                    "source": source,
-                    "chunk_type": "structure",
-                    "header": header,
-                    "level": level,
-                }
+                if len(body) < 40:
+                    continue
 
                 all_chunks.append(
                     Chunk(
@@ -211,7 +201,7 @@ class StructureChunker(BaseChunker):
                             chunk_type="structure",
                             header=header,
                             level=level,
-                            article_number=None,
+                            article_number=current_article,  # 🔥 ВОТ ГЛАВНОЕ
                             topics=[]
                         )
                     )
@@ -252,6 +242,7 @@ class SmartChunker(BaseChunker):
                 for sc in sentence_chunks:
                     sc.metadata.header = chunk.metadata.header
                     sc.metadata.level = chunk.metadata.level
+                    sc.metadata.article_number = chunk.metadata.article_number
                     final_chunks.append(sc)
                 continue
 
@@ -260,6 +251,7 @@ class SmartChunker(BaseChunker):
             for wc in window_chunks:
                 wc.metadata.header = chunk.metadata.header
                 wc.metadata.level = chunk.metadata.level
+                wc.metadata.article_number = chunk.metadata.article_number
                 final_chunks.append(wc)
 
         return final_chunks
