@@ -140,6 +140,7 @@ class WindowChunker(BaseChunker):
 
         return chunks
 
+
 class StructureChunker(BaseChunker):
 
     HEADER_PATTERN = re.compile(r"^(#{1,4})\s+(.+)", re.MULTILINE)
@@ -157,44 +158,55 @@ class StructureChunker(BaseChunker):
             return []
 
         sections = self._split_sections(text)
-        all_chunks = []
+        chunks = []
 
         current_article = None
 
         for section in sections:
 
             article_match = self.ARTICLE_PATTERN.search(section)
-
             if article_match:
                 current_article = article_match.group(1)
 
-            matches = list(self.HEADER_PATTERN.finditer(section))
+            matches: List[re.Match[str]] = list(self.HEADER_PATTERN.finditer(section))
 
             if not matches:
                 if self.fallback:
                     fallback_chunks = self.fallback.split(section, source=source)
-
                     for fc in fallback_chunks:
                         fc.metadata.article_number = current_article
-                        all_chunks.append(fc)
-
+                        chunks.append(fc)
                 continue
 
-            for i, match in enumerate(matches):
-                start = match.start()
-                end = matches[i + 1].start() if i + 1 < len(matches) else len(section)
+            i = 0
+            while i < len(matches):
 
-                header = match.group(2).strip()
-                level = len(match.group(1))
+                current = matches[i]
+                start = current.start()
+                level = len(current.group(1))
+                header = current.group(2).strip()
 
-                body = section[start:end].strip()
+                j = i + 1
 
-                if len(body) < 40:
+                while j < len(matches):
+                    next_level = len(matches[j].group(1))
+
+                    if next_level <= level:
+                        break
+
+                    j += 1
+
+                end = matches[j].start() if j < len(matches) else len(section)
+
+                block = section[start:end].strip()
+
+                if len(block) < 80:
+                    i = j
                     continue
 
-                all_chunks.append(
+                chunks.append(
                     Chunk(
-                        text=body,
+                        text=block,
                         metadata=ChunkMetadata(
                             source=source or "",
                             file="",
@@ -207,8 +219,9 @@ class StructureChunker(BaseChunker):
                     )
                 )
 
-        return all_chunks
+                i = j
 
+        return chunks
 
 class SmartChunker(BaseChunker):
 
