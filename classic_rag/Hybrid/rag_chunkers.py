@@ -201,7 +201,7 @@ class StructureChunker(BaseChunker):
                             chunk_type="structure",
                             header=header,
                             level=level,
-                            article_number=current_article,  # 🔥 ВОТ ГЛАВНОЕ
+                            article_number=current_article,
                             topics=[]
                         )
                     )
