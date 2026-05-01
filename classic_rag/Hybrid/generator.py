@@ -39,7 +39,6 @@ class ContextCleaner(BaseContextCleaner):
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
-
 class QwenClient(BaseLLMClient):
 
     def __init__(self, model_path: str):
@@ -47,16 +46,16 @@ class QwenClient(BaseLLMClient):
             model_path=str(model_path),
             n_ctx=4096,
             n_threads=8,
-            top_p=0.9,
-            repeat_penalty=1.2,
-            temperature=0.1
+            top_p=0.8,
+            temperature=0.0,
+            repeat_penalty=1.15
         )
 
     def generate(self, prompt: str) -> str:
         output = self.llm(
             prompt,
-            max_tokens=180,
-            stop=["\n\n\n", "ВОПРОС:", "КОНТЕКСТ:"]
+            max_tokens=200,
+            stop=["\n\n\n", "Контекст:", "Вопрос:"]
         )
 
         answer = output["choices"][0]["text"].strip()
@@ -79,65 +78,64 @@ class LaborPromptBuilder(BasePromptBuilder):
 
     def build(self, query: str, context: str) -> str:
         return f"""
-        Ты — эксперт по трудовому праву Российской Федерации.
-
-        Твоя задача — дать ТОЧНЫЙ и ПОЛНЫЙ ответ строго на основе контекста.
-
-        КРИТИЧЕСКИЕ ПРАВИЛА:
-        - НЕ сокращай формулировки закона
-        - ЕСЛИ в контексте есть список — ОБЯЗАТЕЛЬНО приведи его полностью
-        - НЕ обобщай (нельзя писать "и другие")
-        - Используй формулировки максимально близкие к тексту закона
-        - Если есть несколько пунктов — оформи их списком
-
-        ФОРМАТ:
+        Ты — юридический ассистент по трудовому праву РФ.
+        
+        Отвечай СТРОГО по контексту.
+        
+        ПРАВИЛА:
+        - НЕ добавляй информацию вне контекста
+        - НЕ придумывай статьи
+        - НЕ повторяй ответ
+        - НЕ пиши лишний текст
+        - Если есть список — приведи его ПОЛНОСТЬЮ
+        - Если ответа нет → "Нет данных в контексте"
+        
+        ФОРМАТ (строго):
+        
         Ответ:
-        <полный развёрнутый ответ>
-
+        - пункт 1
+        - пункт 2
+        
         Источник:
-        <статья ТК РФ или "-">
-
-        =====================
-        ПРИМЕР:
-
-        КОНТЕКСТ:
-        Сферы правового регулирования:
-        Трудовое законодательство регулирует отношения, связанные с:
+        - Статья X ТК РФ
+        
+        === ПРИМЕР ===
+        
+        Контекст:
+        Трудовое законодательство регулирует отношения:
         - организацией труда
         - управлением трудом
-        - трудоустройством у данного работодателя
-
-        ВОПРОС:
+        
+        Вопрос:
         что регулирует трудовое законодательство
-
+        
         Ответ:
-        Трудовое законодательство регулирует отношения, связанные с:
+        Трудовое законодательство регулирует отношения:
         - организацией труда
         - управлением трудом
-        - трудоустройством у данного работодателя
-
+        
         Источник:
         Статья 1 ТК РФ
-
-        =====================
-
-        КОНТЕКСТ:
+        
+        === КОНЕЦ ПРИМЕРА ===
+        
+        Контекст:
         {context}
-
-        ВОПРОС:
+        
+        Вопрос:
         {query}
-
-        КОНЕЦ_ОТВЕТА
+        
+        Ответ:
         """.strip()
 
 
 class Generator(BaseGenerator):
 
     def __init__(
-            self,
-            llm: BaseLLMClient,
-            prompt_builder: BasePromptBuilder,
-            cleaner: BaseContextCleaner
+        self,
+        llm: BaseLLMClient,
+        prompt_builder: BasePromptBuilder,
+        cleaner: BaseContextCleaner
     ):
         self.llm = llm
         self.prompt_builder = prompt_builder
@@ -147,7 +145,7 @@ class Generator(BaseGenerator):
         context = self.cleaner.clean_context(context)
 
         if not context:
-            return "Факт\nВ предоставленном контексте отсутствует информация\n-"
+            return "Ответ:\nНет данных в контексте\n\nИсточник:\n-"
 
         prompt = self.prompt_builder.build(query, context)
         raw = self.llm.generate(prompt)
@@ -155,8 +153,22 @@ class Generator(BaseGenerator):
         return self._postprocess(raw)
 
     def _postprocess(self, text: str) -> str:
-        text = text.replace("КОНЕЦ_ОТВЕТА", "").strip()
+
+        text = re.sub(r"КОНЕЦ_ОТВЕТА.*", "", text, flags=re.DOTALL)
+
+        if text.count("Ответ:") > 1:
+            text = "Ответ:" + text.split("Ответ:")[1]
+
+        text = re.sub(r"Вот ответ:?", "", text, flags=re.IGNORECASE)
+
+        text = re.split(r"(Источник:)", text, maxsplit=1)
+
+        if len(text) >= 3:
+            text = text[0] + text[1] + text[2]
 
         text = re.sub(r"\n{3,}", "\n\n", text)
+
+        if "Источник:" not in text:
+            text += "\n\nИсточник:\n-"
 
         return text.strip()

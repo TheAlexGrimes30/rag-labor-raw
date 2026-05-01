@@ -140,6 +140,7 @@ class WindowChunker(BaseChunker):
 
         return chunks
 
+
 class StructureChunker(BaseChunker):
 
     HEADER_PATTERN = re.compile(r"^(#{1,4})\s+(.+)", re.MULTILINE)
@@ -157,68 +158,70 @@ class StructureChunker(BaseChunker):
             return []
 
         sections = self._split_sections(text)
-        all_chunks = []
+        chunks = []
+
+        current_article = None
 
         for section in sections:
+
             article_match = self.ARTICLE_PATTERN.search(section)
-
             if article_match:
-                all_chunks.append(
-                    Chunk(
-                        text=section.strip(),
-                        metadata=ChunkMetadata(
-                            source=source or "",
-                            file="",
-                            chunk_type="structure",
-                            header=None,
-                            level=None,
-                            article_number=article_match.group(1),
-                            topics=[]
-                        )
-                    )
-                )
-                continue
+                current_article = article_match.group(1)
 
-            matches = list(self.HEADER_PATTERN.finditer(section))
+            matches: List[re.Match[str]] = list(self.HEADER_PATTERN.finditer(section))
 
             if not matches:
                 if self.fallback:
-                    all_chunks.extend(self.fallback.split(section, source=source))
+                    fallback_chunks = self.fallback.split(section, source=source)
+                    for fc in fallback_chunks:
+                        fc.metadata.article_number = current_article
+                        chunks.append(fc)
                 continue
 
-            for i, match in enumerate(matches):
-                start = match.start()
-                end = matches[i + 1].start() if i + 1 < len(matches) else len(section)
+            i = 0
+            while i < len(matches):
 
-                header = match.group(2).strip()
-                level = len(match.group(1))
+                current = matches[i]
+                start = current.start()
+                level = len(current.group(1))
+                header = current.group(2).strip()
 
-                body = section[start:end].strip()
+                j = i + 1
 
-                payload = {
-                    "source": source,
-                    "chunk_type": "structure",
-                    "header": header,
-                    "level": level,
-                }
+                while j < len(matches):
+                    next_level = len(matches[j].group(1))
 
-                all_chunks.append(
+                    if next_level <= level:
+                        break
+
+                    j += 1
+
+                end = matches[j].start() if j < len(matches) else len(section)
+
+                block = section[start:end].strip()
+
+                if len(block) < 80:
+                    i = j
+                    continue
+
+                chunks.append(
                     Chunk(
-                        text=body,
+                        text=block,
                         metadata=ChunkMetadata(
                             source=source or "",
                             file="",
                             chunk_type="structure",
                             header=header,
                             level=level,
-                            article_number=None,
+                            article_number=current_article,
                             topics=[]
                         )
                     )
                 )
 
-        return all_chunks
+                i = j
 
+        return chunks
 
 class SmartChunker(BaseChunker):
 
@@ -252,6 +255,7 @@ class SmartChunker(BaseChunker):
                 for sc in sentence_chunks:
                     sc.metadata.header = chunk.metadata.header
                     sc.metadata.level = chunk.metadata.level
+                    sc.metadata.article_number = chunk.metadata.article_number
                     final_chunks.append(sc)
                 continue
 
@@ -260,6 +264,7 @@ class SmartChunker(BaseChunker):
             for wc in window_chunks:
                 wc.metadata.header = chunk.metadata.header
                 wc.metadata.level = chunk.metadata.level
+                wc.metadata.article_number = chunk.metadata.article_number
                 final_chunks.append(wc)
 
         return final_chunks
