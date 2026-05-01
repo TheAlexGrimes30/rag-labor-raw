@@ -35,8 +35,13 @@ class BaseGenerator(ABC):
 class ContextCleaner(BaseContextCleaner):
 
     def clean_context(self, text: str) -> str:
+        if not text:
+            return ""
+
         text = re.sub(r"#+", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+
         return text.strip()
 
 class QwenClient(BaseLLMClient):
@@ -46,24 +51,31 @@ class QwenClient(BaseLLMClient):
             model_path=str(model_path),
             n_ctx=4096,
             n_threads=8,
-            top_p=0.8,
+            top_p=0.7,
             temperature=0.0,
-            repeat_penalty=1.15
+            repeat_penalty=1.2
         )
 
     def generate(self, prompt: str) -> str:
         output = self.llm(
             prompt,
-            max_tokens=200,
-            stop=["\n\n\n", "Контекст:", "Вопрос:"]
+            max_tokens=150,
+            stop=[
+                "\n\n\n",
+                "КОНТЕКСТ:",
+                "ВОПРОС:",
+                "Правила:",
+                "Ты извлекаешь",
+                "Пример:",
+            ]
         )
 
-        answer = output["choices"][0]["text"].strip()
+        text = output["choices"][0]["text"]
 
-        answer = re.sub(r"<.*?>", "", answer)
-        answer = re.sub(r"\n{3,}", "\n\n", answer)
+        text = re.sub(r"<.*?>", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
 
-        return answer.strip()
+        return text.strip()
 
     def close(self):
         if self.llm is not None:
@@ -78,56 +90,38 @@ class LaborPromptBuilder(BasePromptBuilder):
 
     def build(self, query: str, context: str) -> str:
         return f"""
-        Ты — юридический ассистент по трудовому праву РФ.
-        
-        Отвечай СТРОГО по контексту.
-        
-        ПРАВИЛА:
-        - НЕ добавляй информацию вне контекста
-        - НЕ придумывай статьи
-        - НЕ повторяй ответ
-        - НЕ пиши лишний текст
-        - Если есть список — приведи его ПОЛНОСТЬЮ
-        - Если ответа нет → "Нет данных в контексте"
-        
-        ФОРМАТ (строго):
-        
+        Ты извлекаешь информацию из юридического текста.
+    
+        Правила:
+        - Используй только текст из КОНТЕКСТА
+        - Ничего не добавляй
+        - Не объясняй
+        - Не перефразируй
+        - Копируй формулировки максимально точно
+    
+        Если ответа нет:
         Ответ:
-        - пункт 1
-        - пункт 2
-        
+        Нет данных в контексте
+    
         Источник:
-        - Статья X ТК РФ
-        
-        === ПРИМЕР ===
-        
-        Контекст:
-        Трудовое законодательство регулирует отношения:
-        - организацией труда
-        - управлением трудом
-        
-        Вопрос:
-        что регулирует трудовое законодательство
-        
+        -
+    
+        Формат ответа строго:
+    
         Ответ:
-        Трудовое законодательство регулирует отношения:
-        - организацией труда
-        - управлением трудом
-        
+        - ...
+    
         Источник:
-        Статья 1 ТК РФ
-        
-        === КОНЕЦ ПРИМЕРА ===
-        
-        Контекст:
+        - ...
+    
+        КОНТЕКСТ:
         {context}
-        
-        Вопрос:
+    
+        ВОПРОС:
         {query}
-        
+    
         Ответ:
         """.strip()
-
 
 class Generator(BaseGenerator):
 
@@ -145,30 +139,67 @@ class Generator(BaseGenerator):
         context = self.cleaner.clean_context(context)
 
         if not context:
-            return "Ответ:\nНет данных в контексте\n\nИсточник:\n-"
+            return self._empty()
 
         prompt = self.prompt_builder.build(query, context)
         raw = self.llm.generate(prompt)
 
-        return self._postprocess(raw)
+        return self._postprocess(raw, context)
 
-    def _postprocess(self, text: str) -> str:
+    def _empty(self):
+        return "Ответ:\nНет данных в контексте\n\nИсточник:\n-"
 
-        text = re.sub(r"КОНЕЦ_ОТВЕТА.*", "", text, flags=re.DOTALL)
+    def _postprocess(self, text: str, context: str) -> str:
 
-        if text.count("Ответ:") > 1:
-            text = "Ответ:" + text.split("Ответ:")[1]
+        if not text:
+            return self._empty()
 
-        text = re.sub(r"Вот ответ:?", "", text, flags=re.IGNORECASE)
+        text = text.strip()
 
-        text = re.split(r"(Источник:)", text, maxsplit=1)
+        text = re.sub(
+            r"(Таким образом.*|В этом примере.*|Ты понимаешь.*)",
+            "",
+            text,
+            flags=re.IGNORECASE | re.DOTALL
+        )
 
-        if len(text) >= 3:
-            text = text[0] + text[1] + text[2]
+        text = re.sub(r"^(Ответ на вопрос:.*?\n)", "", text, flags=re.IGNORECASE)
 
-        text = re.sub(r"\n{3,}", "\n\n", text)
+        if "Источник:" in text:
+            text = text.split("Источник:")[0] + "Источник:" + text.split("Источник:")[1]
+
+        if "Ответ:" not in text:
+            text = "Ответ:\n" + text
 
         if "Источник:" not in text:
             text += "\n\nИсточник:\n-"
 
+        text = self._enforce_extractive(text, context)
+
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
         return text.strip()
+
+    def _enforce_extractive(self, text: str, context: str) -> str:
+        """
+        Удаляет строки, которых нет в контексте (анти-галлюцинация)
+        """
+        lines = text.split("\n")
+        context_lower = context.lower()
+
+        filtered = []
+
+        for line in lines:
+            clean_line = line.strip("- ").strip()
+
+            if line.startswith("Ответ") or line.startswith("Источник"):
+                filtered.append(line)
+                continue
+
+            if clean_line and clean_line.lower() in context_lower:
+                filtered.append(line)
+
+        if len(filtered) <= 2:
+            return self._empty()
+
+        return "\n".join(filtered)
