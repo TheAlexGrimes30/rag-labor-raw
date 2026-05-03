@@ -49,30 +49,23 @@ class RAGService:
     def ask(self, query: str) -> RAGResponse:
 
         hits = self.retriever.retrieve(query, top_k=25)
-
         hits = self._deduplicate(hits)
 
-        print("\n--- RETRIEVER ---")
-        for h in hits[:10]:
-            print(f"[{h.score:.4f}] {h.text[:80]}...")
-
-        reranked = self.reranker.rerank(
-            query=query,
-            hits=hits,
-            top_n=6
-        )
-
-        print("\n--- RERANKED ---")
-        for h in reranked:
-            print(f"[{h.score:.4f}] {h.text[:80]}...")
+        reranked = self.reranker.rerank(query=query, hits=hits, top_n=6)
 
         context = self._build_context(reranked)
 
         answer = self.generator.generate(query, context)
 
+        sources = list({
+            f"Статья {h.payload.get('article_number')}"
+            for h in reranked
+            if h.payload.get("article_number")
+        })
+
         return RAGResponse(
             answer=answer,
-            sources=[h.payload for h in reranked]
+            sources=sources
         )
 
     def _build_context(self, hits: List[SearchResult]) -> str:
@@ -87,6 +80,8 @@ class RAGService:
 
         for article, items in grouped.items():
 
+            items = sorted(items, key=lambda x: x.score, reverse=True)
+
             block = [f"СТАТЬЯ {article}"]
 
             for h in items:
@@ -96,7 +91,7 @@ class RAGService:
                 if len(text) < 30:
                     continue
 
-                block.append(f"### {header}\n{text}")
+                block.append(f"{header}\n{text}")
 
             parts.append("\n\n".join(block))
 

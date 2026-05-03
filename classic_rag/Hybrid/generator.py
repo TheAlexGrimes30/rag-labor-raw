@@ -79,31 +79,31 @@ class LaborPromptBuilder(BasePromptBuilder):
     def build(self, query: str, context: str) -> str:
         return f"""
         Ты — юридический ассистент по трудовому праву РФ.
-
+    
         ЗАДАЧА:
         Ответь строго по контексту.
-
-        ПРАВИЛА:
+    
+        ЖЁСТКИЕ ПРАВИЛА:
         - Используй ТОЛЬКО контекст
-        - Не добавляй внешние знания
-        - Если ответа нет → "Нет данных в контексте"
-        - Не повторяй вопрос
-        - Не рассуждай
-
-        ФОРМАТ ОТВЕТА:
+        - Не добавляй объяснения
+        - Не добавляй примеры
+        - Не повторяй пункты
+        - Не пиши ничего вне формата
+    
+        ЕСЛИ нет ответа:
         Ответ:
-        - пункт 1
-        - пункт 2
-
-        Источник:
-        - Статья X ТК РФ
-
+        Нет данных в контексте
+    
+        ФОРМАТ:
+        Ответ:
+        - пункт
+    
         КОНТЕКСТ:
         {context}
-
+    
         ВОПРОС:
         {query}
-
+    
         ОТВЕТ:
         """.strip()
 
@@ -133,21 +133,34 @@ class Generator(BaseGenerator):
 
     def _postprocess(self, text: str) -> str:
 
-        text = re.sub(r"КОНЕЦ_ОТВЕТА.*", "", text, flags=re.DOTALL)
+        text = re.sub(r"<.*?>", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
 
         if text.count("Ответ:") > 1:
             text = "Ответ:" + text.split("Ответ:")[1]
 
         text = re.sub(r"Вот ответ:?", "", text, flags=re.IGNORECASE)
 
-        text = re.split(r"(Источник:)", text, maxsplit=1)
-
-        if len(text) >= 3:
-            text = text[0] + text[1] + text[2]
-
-        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = self._deduplicate_bullets(text)
 
         if "Источник:" not in text:
             text += "\n\nИсточник:\n-"
 
         return text.strip()
+
+    def _deduplicate_bullets(self, text: str) -> str:
+        lines = text.splitlines()
+        seen = set()
+        result = []
+
+        for line in lines:
+            stripped = line.strip().lower()
+
+            if stripped.startswith("-"):
+                if stripped in seen:
+                    continue
+                seen.add(stripped)
+
+            result.append(line)
+
+        return "\n".join(result)
