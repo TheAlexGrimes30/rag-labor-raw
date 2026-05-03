@@ -268,3 +268,4 @@ class SmartChunker(BaseChunker):
                 final_chunks.append(wc)
 
         return final_chunks
+    

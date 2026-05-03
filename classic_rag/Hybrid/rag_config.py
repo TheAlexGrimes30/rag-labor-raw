@@ -192,4 +192,3 @@ class RerankMapper:
             id=base.id,
             source=f"{base.source}+reranker" if base.source else "reranker",
         )
-
