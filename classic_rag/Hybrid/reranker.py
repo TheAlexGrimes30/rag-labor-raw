@@ -39,19 +39,17 @@ class Reranker:
         model = CrossEncoder(model_name)
 
         tokenizer = model.tokenizer
-
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         model.model.config.pad_token_id = tokenizer.pad_token_id
-
         return model
 
     def rerank(
-            self,
-            query: str,
-            hits: List[SearchResult],
-            top_n: int | None = None
+        self,
+        query: str,
+        hits: List[SearchResult],
+        top_n: int | None = None
     ) -> List[SearchResult]:
 
         if not hits:
@@ -63,10 +61,7 @@ class Reranker:
         if not valid_hits:
             return []
 
-        pairs = [
-            self._build_pair(query, h)
-            for h in valid_hits
-        ]
+        pairs = [self._build_pair(query, h) for h in valid_hits]
 
         try:
             scores = self.model.predict(
@@ -78,12 +73,7 @@ class Reranker:
             print(f"[Reranker ERROR] {e}")
             return valid_hits[:top_n]
 
-        scored = []
-
-        for hit, score in zip(valid_hits, scores):
-            boosted_score = self._boost(hit, float(score))
-            scored.append((hit, boosted_score))
-
+        scored = [(hit, float(score)) for hit, score in zip(valid_hits, scores)]
         ranked = sorted(scored, key=lambda x: x[1], reverse=True)
 
         reranked = [
@@ -91,86 +81,46 @@ class Reranker:
             for h, score in ranked
         ]
 
-        diversified = self._diversify(reranked, top_n)
-
-        return diversified
+        return self._diversify(reranked, top_n)
 
     def _build_pair(self, query: str, doc: SearchResult) -> Tuple[str, str]:
 
         header = doc.payload.get("header") or ""
         article = doc.payload.get("article_number") or ""
-
         text = self._truncate(doc.text)
 
         enriched_doc = f"""
+        Документ:
         Статья {article}
-        {header}
-    
+        Раздел: {header}
+        
+        Содержание:
         {text}
-                """.strip()
+        """.strip()
 
         return query, enriched_doc
 
     def _truncate(self, text: str) -> str:
-
         if len(text) <= 1000:
             return text
 
-        head = text[:500]
-        tail = text[-500:]
+        return text[:500] + "\n...\n" + text[-500:]
 
-        return head + "\n...\n" + tail
-
-    def _boost(self, hit: SearchResult, score: float) -> float:
-
-        header = (hit.payload.get("header") or "").lower()
-        text = (hit.text or "").lower()
-
-        if "цели" in header:
-            score += 0.15
-        if "задачи" in header:
-            score += 0.1
-        if "принципы" in header:
-            score += 0.15
-        if "определение" in header:
-            score += 0.2
-
-        if "-" in text or "•" in text:
-            score += 0.1
-
-        if hit.payload.get("article_number"):
-            score += 0.05
-
-        return score
-
-    def _diversify(
-            self,
-            hits: List[SearchResult],
-            top_n: int
-    ) -> List[SearchResult]:
+    def _diversify(self, hits: List[SearchResult], top_n: int) -> List[SearchResult]:
 
         selected = []
-        seen_headers = set()
-        seen_articles = set()
+        seen = set()
 
         for h in hits:
+            key = (h.payload.get("header"), h.payload.get("article_number"))
 
-            header = h.payload.get("header")
-            article = h.payload.get("article_number")
-
-            key = (header, article)
-
-            if key in seen_headers:
+            if key in seen:
                 continue
 
             selected.append(h)
-            seen_headers.add(key)
-
-            if article:
-                seen_articles.add(article)
+            seen.add(key)
 
             if len(selected) >= top_n:
                 break
 
         return selected
-    
