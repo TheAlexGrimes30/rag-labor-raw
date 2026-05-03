@@ -6,15 +6,16 @@ from sentence_transformers import CrossEncoder
 
 from classic_rag.Hybrid.rag_config import SearchResult
 
+
 class BaseReranker(ABC):
 
     @abstractmethod
     def rerank(
-        self,
-        query: str,
-        hits: List["SearchResult"],
-        *,
-        top_n: int
+            self,
+            query: str,
+            hits: List["SearchResult"],
+            *,
+            top_n: int
     ) -> List["SearchResult"]:
         raise NotImplementedError
 
@@ -22,11 +23,11 @@ class BaseReranker(ABC):
 class Reranker:
 
     def __init__(
-        self,
-        model_name: str = "Qwen/Qwen3-Reranker-0.6B",
-        batch_size: int = 8,
-        max_length: int = 512,
-        top_n: int = 6
+            self,
+            model_name: str = "Qwen/Qwen3-Reranker-0.6B",
+            batch_size: int = 8,
+            max_length: int = 512,
+            top_n: int = 6
     ):
         self.model = self._load(model_name)
         self.batch_size = batch_size
@@ -46,10 +47,10 @@ class Reranker:
         return model
 
     def rerank(
-        self,
-        query: str,
-        hits: List[SearchResult],
-        top_n: int | None = None
+            self,
+            query: str,
+            hits: List[SearchResult],
+            top_n: int | None = None
     ) -> List[SearchResult]:
 
         if not hits:
@@ -93,7 +94,7 @@ class Reranker:
         Документ:
         Статья {article}
         Раздел: {header}
-        
+
         Содержание:
         {text}
         """.strip()

@@ -39,6 +39,7 @@ class ContextCleaner(BaseContextCleaner):
         text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
+
 class QwenClient(BaseLLMClient):
 
     def __init__(self, model_path: str):
@@ -79,31 +80,31 @@ class LaborPromptBuilder(BasePromptBuilder):
     def build(self, query: str, context: str) -> str:
         return f"""
         Ты — юридический ассистент по трудовому праву РФ.
-    
+
         ЗАДАЧА:
         Ответь строго по контексту.
-    
+
         ЖЁСТКИЕ ПРАВИЛА:
         - Используй ТОЛЬКО контекст
         - Не добавляй объяснения
         - Не добавляй примеры
         - Не повторяй пункты
         - Не пиши ничего вне формата
-    
+
         ЕСЛИ нет ответа:
         Ответ:
         Нет данных в контексте
-    
+
         ФОРМАТ:
         Ответ:
         - пункт
-    
+
         КОНТЕКСТ:
         {context}
-    
+
         ВОПРОС:
         {query}
-    
+
         ОТВЕТ:
         """.strip()
 
@@ -111,10 +112,10 @@ class LaborPromptBuilder(BasePromptBuilder):
 class Generator(BaseGenerator):
 
     def __init__(
-        self,
-        llm: BaseLLMClient,
-        prompt_builder: BasePromptBuilder,
-        cleaner: BaseContextCleaner
+            self,
+            llm: BaseLLMClient,
+            prompt_builder: BasePromptBuilder,
+            cleaner: BaseContextCleaner
     ):
         self.llm = llm
         self.prompt_builder = prompt_builder
