@@ -18,6 +18,7 @@ class ChunkMetadata:
     header: str | None
     level: int | None
     article_number: str | None
+    chunk_index: int | None = None
     topics: List[str] = field(default_factory=list)
 
 

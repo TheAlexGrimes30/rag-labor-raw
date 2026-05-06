@@ -231,6 +231,21 @@ def debug_chunks(chunks: List[Chunk]):
     print(f"Duplicates: {duplicates}")
     print(f"Unique chunks: {total - duplicates}")
 
+def save_chunks_to_txt(chunks, path="debug_chunks.txt"):
+    with open(path, "w", encoding="utf-8") as f:
+
+        for i, c in enumerate(chunks):
+
+            payload = c.to_payload()
+
+            f.write(f"\n--- CHUNK {i} ---\n")
+            f.write(f"text:\n{c.text}\n\n")
+            f.write(f"file: {payload.get('file')}\n")
+            f.write(f"article: {payload.get('article_number')}\n")
+            f.write(f"header: {payload.get('header')}\n")
+            f.write(f"level: {payload.get('level')}\n")
+            f.write(f"topics: {payload.get('topics')}\n")
+            f.write("-" * 60 + "\n")
 
 if __name__ == "__main__":
 
@@ -250,6 +265,7 @@ if __name__ == "__main__":
             print("\nQ:", q)
             retriever.debug_query(q, top_k=10)
             debug_chunks(chunks)
+            save_chunks_to_txt(chunks)
             res = rag.ask(q)
             print("A:", res.answer)
             res = rag.ask(q)
