@@ -161,10 +161,9 @@ class HybridLegalChunker:
             topics=(frontmatter.get("classic_rag", {}) or {}).get("topics", []),
         )
 
-    def process_section(self, section, metadata, filepath):
+    def process_section(self, section, base_metadata, filepath):
 
         header = section["header"]
-        level = section["level"]
 
         raw_text = "\n".join(section["content"]).strip()
         if not raw_text:
@@ -178,13 +177,22 @@ class HybridLegalChunker:
         chunks = []
 
         for i, part in enumerate(merged_parts):
-
             part = part.strip()
 
             if not self.validator.is_valid(part):
                 continue
 
             chunk_id = self._make_chunk_id(part, filepath, i)
+
+            metadata = ChunkMetadata(
+                source=base_metadata.source,
+                file=base_metadata.file,
+                header=base_metadata.header,
+                level=base_metadata.level,
+                article_number=base_metadata.article_number,
+                chunk_index=i,
+                topics=base_metadata.topics
+            )
 
             chunks.append(
                 Chunk(
