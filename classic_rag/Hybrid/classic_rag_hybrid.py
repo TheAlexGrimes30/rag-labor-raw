@@ -5,7 +5,7 @@ from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
 from classic_rag.Hybrid.ingestion import IngestionPipeline, MarkdownDocumentLoader
-from classic_rag.Hybrid.rag_chunkers import SimpleMarkdownParser
+from classic_rag.Hybrid.rag_chunkers import HybridLegalChunker
 from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
 from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
@@ -127,10 +127,7 @@ class ClassicRAG:
 
         loader = MarkdownDocumentLoader(str(rag_db_path))
 
-        parser = SimpleMarkdownParser(
-            chunk_size=800,
-            chunk_overlap=100
-        )
+        parser = HybridLegalChunker()
 
         pipeline = IngestionPipeline(
             loader=loader,
