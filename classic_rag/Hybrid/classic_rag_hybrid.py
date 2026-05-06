@@ -4,8 +4,8 @@ from typing import List
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
-from classic_rag.Hybrid.ingestion import MarkdownDocumentLoader, IngestionPipeline
-from classic_rag.Hybrid.rag_chunkers import SentenceChunker, WindowChunker, StructureChunker, SmartChunker
+from classic_rag.Hybrid.ingestion import IngestionPipeline, MarkdownDocumentLoader
+from classic_rag.Hybrid.rag_chunkers import HybridLegalChunker
 from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
 from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
@@ -127,30 +127,11 @@ class ClassicRAG:
 
         loader = MarkdownDocumentLoader(str(rag_db_path))
 
-        sentence_chunker = SentenceChunker(
-            chunk_size=800,
-            overlap_sentences=2
-        )
-
-        window_chunker = WindowChunker(
-            max_chars=800,
-            overlap=150
-        )
-
-        structure_chunker = StructureChunker(
-            fallback_chunker=sentence_chunker
-        )
-
-        chunker = SmartChunker(
-            structure_chunker=structure_chunker,
-            sentence_chunker=sentence_chunker,
-            window_chunker=window_chunker,
-            max_chars=800
-        )
+        parser = HybridLegalChunker()
 
         pipeline = IngestionPipeline(
             loader=loader,
-            chunker=chunker
+            chunker=parser
         )
 
         self.ingestion = IngestionService(pipeline)
@@ -193,14 +174,14 @@ class ClassicRAG:
         self.generator = generator
 
         print("Running ingestion...")
-        chunks = self.ingestion.load_chunks()
+        self.chunks = self.ingestion.load_chunks()
 
-        print(f"\n[DEBUG] Total chunks: {len(chunks)}")
+        print(f"\n[DEBUG] Total chunks: {len(self.chunks)}")
 
-        for c in chunks[:20]:
+        for c in self.chunks[:20]:
             print(c.metadata.article_number, "|", c.metadata.header)
 
-        for i, c in enumerate(chunks[:5]):
+        for i, c in enumerate(self.chunks[:5]):
             payload = c.to_payload()
 
             print(f"\n--- CHUNK {i} ---")
@@ -210,7 +191,7 @@ class ClassicRAG:
             print(f"header: {payload.get('header')}")
 
         print("Indexing...")
-        self.index_service.index(chunks)
+        self.index_service.index(self.chunks)
 
 
     def ask(self, query: str) -> RAGResponse:
@@ -224,10 +205,53 @@ class ClassicRAG:
 
         self.client.close()
 
+def debug_chunks(chunks: List[Chunk]):
+    print("\n[DEBUG] ===== CHUNK QUALITY =====")
+
+    total = len(chunks)
+    short = 0
+    duplicates = 0
+
+    seen = set()
+
+    for c in chunks:
+        text = (c.text or "").strip()
+
+        if len(text) < 50:
+            short += 1
+
+        key = text[:200]
+        if key in seen:
+            duplicates += 1
+        else:
+            seen.add(key)
+
+    print(f"Total chunks: {total}")
+    print(f"Short chunks (<50 chars): {short}")
+    print(f"Duplicates: {duplicates}")
+    print(f"Unique chunks: {total - duplicates}")
+
+def save_chunks_to_txt(chunks, path="debug_chunks.txt"):
+    with open(path, "w", encoding="utf-8") as f:
+
+        for i, c in enumerate(chunks):
+
+            payload = c.to_payload()
+
+            f.write(f"\n--- CHUNK {i} ---\n")
+            f.write(f"text:\n{c.text}\n\n")
+            f.write(f"file: {payload.get('file')}\n")
+            f.write(f"article: {payload.get('article_number')}\n")
+            f.write(f"header: {payload.get('header')}\n")
+            f.write(f"level: {payload.get('level')}\n")
+            f.write(f"topics: {payload.get('topics')}\n")
+            f.write("-" * 60 + "\n")
 
 if __name__ == "__main__":
 
     rag = ClassicRAG()
+    retriever = rag.rag_service.retriever
+    chunks = rag.chunks
 
     try:
         questions = [
@@ -239,6 +263,11 @@ if __name__ == "__main__":
 
         for q in questions:
             print("\nQ:", q)
+            retriever.debug_query(q, top_k=10)
+            debug_chunks(chunks)
+            save_chunks_to_txt(chunks)
+            res = rag.ask(q)
+            print("A:", res.answer)
             res = rag.ask(q)
             print("A:", res.answer)
 

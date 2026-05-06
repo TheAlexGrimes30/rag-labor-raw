@@ -1,11 +1,12 @@
+import re
 from abc import abstractmethod, ABC
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict
 
 import yaml
 from langchain_core.documents import Document
 
-from classic_rag.Hybrid.rag_config import Chunk, ChunkMetadata
+from classic_rag.Hybrid.rag_config import Chunk
 
 
 class BaseDocumentLoader(ABC):
@@ -14,68 +15,26 @@ class BaseDocumentLoader(ABC):
     def load(self) -> List[Document]:
         raise NotImplementedError
 
-class MarkdownDocumentLoader(BaseDocumentLoader):
-
+class MarkdownDocumentLoader:
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
 
-    def load(self) -> List[Document]:
-        docs: List[Document] = []
+    def load(self) -> list[Path]:
+        return list(self.data_dir.rglob("*.md"))
 
-        for file_path in self.data_dir.rglob("*.md"):
-            try:
-                raw = file_path.read_text(encoding="utf-8")
-            except Exception:
-                continue
+    def parse_file(self, path: str) -> Tuple[Dict, str]:
+        text = Path(path).read_text(encoding="utf-8")
 
-            metadata, content = self._parse_markdown(raw)
+        match = re.match(r'^---\n(.*?)\n---\n(.*)$', text, re.DOTALL)
 
-            content = (content or "").strip()
-            if not content:
-                continue
+        if match:
+            frontmatter = yaml.safe_load(match.group(1)) or {}
+            body = match.group(2)
+        else:
+            frontmatter = {}
+            body = text
 
-            classic = metadata.get("classic_rag", {}) or {}
-            topics = classic.get("topics", []) if isinstance(classic, dict) else []
-
-            docs.append(
-                Document(
-                    page_content=content,
-                    metadata={
-                        "source": str(file_path),
-                        "file": file_path.name,
-                        "topics": topics,
-                        "classic_rag": classic
-                    }
-                )
-            )
-
-        print(f"Loaded docs: {len(docs)}")
-        return docs
-
-    def _parse_markdown(self, text: str) -> Tuple[Dict[str, Any], str]:
-        if not text.startswith("---"):
-            return {}, text
-
-        try:
-            parts = text.split("---", 2)
-            if len(parts) < 3:
-                return {}, text
-
-            meta_raw = yaml.safe_load(parts[1]) or {}
-            if not isinstance(meta_raw, dict):
-                meta_raw = {}
-
-            content = parts[2]
-
-            classic = meta_raw.get("classic_rag", {})
-            if not isinstance(classic, dict):
-                classic = {}
-
-            return {"classic_rag": classic}, content
-
-        except Exception:
-            return {}, text
-
+        return frontmatter, body
 
 class IngestionPipeline:
     def __init__(self, loader, chunker):
@@ -83,43 +42,18 @@ class IngestionPipeline:
         self.chunker = chunker
 
     def run(self) -> List[Chunk]:
-        docs = self.loader.load()
+        chunks = []
 
-        if not docs:
-            return []
+        for path in self.loader.load():
 
-        chunks: List[Chunk] = []
+            frontmatter, body = self.loader.parse_file(str(path))
 
-        for doc in docs:
-            text = (doc.page_content or "").strip()
-
-            if not text:
-                continue
-
-            source = doc.metadata.get("source", "")
-            file = doc.metadata.get("file", "")
-            topics = doc.metadata.get("topics", [])
-
-            chunked = self.chunker.split(text, source=source)
-
-            for ch in chunked:
-
-                meta = ChunkMetadata(
-                    source=source,
-                    file=file,
-                    chunk_type=ch.metadata.chunk_type,
-                    header=ch.metadata.header,
-                    level=ch.metadata.level,
-                    article_number=ch.metadata.article_number,
-                    topics=topics,
+            chunks.extend(
+                self.chunker.process(
+                    filepath=str(path),
+                    frontmatter=frontmatter,
+                    body=body
                 )
-
-                chunks.append(
-                    Chunk(
-                        text=ch.text.strip(),
-                        metadata=meta,
-                        chunk_id=ch.chunk_id
-                    )
-                )
+            )
 
         return [c for c in chunks if c.text.strip()]

@@ -333,55 +333,32 @@ class QdrantDenseRetriever(BaseDenseRetriever):
         return results
 
 class AlphaFusion(BaseFusion):
-    """
-    Простая линейная комбинация dense + sparse.
 
-    score = alpha * dense + (1 - alpha) * sparse
-    """
-
-    def __init__(self, alpha: float = 0.5, min_score: float = 0.05):
+    def __init__(self, alpha: float = 0.7, min_score: float = 0.05):
         self.alpha = alpha
         self.min_score = min_score
 
     def fuse(
         self,
         dense: List[SearchResult],
-        sparse_scores: List[float],
+        sparse_dict: Dict[str, float],
     ) -> List[SearchResult]:
-        """
-        Объединение результатов.
-
-        Args:
-            dense (List[SearchResult]): Dense результаты
-            sparse_scores (List[float]): BM25 оценки
-
-        Returns:
-            List[SearchResult]: Отсортированный список
-        """
 
         if not dense:
             return []
 
-        if len(sparse_scores) < len(dense):
-            sparse_scores += [0.0] * (len(dense) - len(sparse_scores))
-
         dense_scores = self._minmax([d.score for d in dense])
 
         fused = []
-        seen = set()
 
         for i, doc in enumerate(dense):
 
-            score = self.alpha * dense_scores[i] + (1 - self.alpha) * sparse_scores[i]
+            sparse_score = sparse_dict.get(str(doc.id), 0.0)
+
+            score = self.alpha * dense_scores[i] + (1 - self.alpha) * sparse_score
 
             if score < self.min_score:
                 continue
-
-            key = hash(doc.text or "")
-            if key in seen:
-                continue
-
-            seen.add(key)
 
             fused.append(
                 SearchResult(
@@ -396,58 +373,27 @@ class AlphaFusion(BaseFusion):
         return sorted(fused, key=lambda x: x.score, reverse=True)
 
     def _minmax(self, values: List[float]) -> List[float]:
-        """
-        Нормализация значений.
-
-        Args:
-            values (List[float]): Значения
-
-        Returns:
-            List[float]: Нормализованные значения
-        """
-
         mn, mx = min(values), max(values)
-
         if abs(mx - mn) < 1e-8:
             return [0.0] * len(values)
         return [(v - mn) / (mx - mn) for v in values]
 
 class Retriever:
-    """
-    Гибридный retriever:
-    - Dense (Qdrant)
-    - Sparse (BM25)
-    - Fusion (Alpha)
 
-    Attributes:
-        vector_store (VectorStore)
-        embedder (Embedder)
-        dense (BaseDenseRetriever)
-        sparse (BaseSparseRetriever)
-        fusion (BaseFusion)
-    """
-
-    def __init__(
-        self,
-        vector_store: VectorStore,
-        embedder: Embedder,
-    ):
+    def __init__(self, vector_store: VectorStore, embedder: Embedder):
         self.vector_store = vector_store
         self.embedder = embedder
 
         self.dense = QdrantDenseRetriever(vector_store)
         self.sparse = BM25Retriever()
-        self.fusion = AlphaFusion()
+        self.fusion = AlphaFusion(alpha=0.7)
 
         self._corpus: List[str] = []
         self._id_map: Dict[str, int] = {}
+        self._reverse_id_map: Dict[int, str] = {}
         self._is_built = False
 
     def build_corpus(self):
-        """
-        Забираем ВСЕ документы из Qdrant payload'ов
-        и строим BM25 индекс.
-        """
 
         if self._is_built:
             return
@@ -461,6 +407,7 @@ class Retriever:
 
         corpus = []
         id_map = {}
+        reverse_map = {}
 
         for p in points:
             payload = p.payload or {}
@@ -472,48 +419,93 @@ class Retriever:
             idx = len(corpus)
             corpus.append(text)
 
-            id_map[str(p.id)] = idx
+            doc_id = str(p.id)
+
+            id_map[doc_id] = idx
+            reverse_map[idx] = doc_id
 
         self._corpus = corpus
         self._id_map = id_map
+        self._reverse_id_map = reverse_map
 
         self.sparse.build(self._corpus)
         self._is_built = True
 
     def retrieve(self, query: str, top_k: int = 10) -> List[SearchResult]:
-        """
-        Выполнить гибридный поиск.
-
-        Алгоритм:
-        1. Кодируем запрос
-        2. Dense retrieval
-        3. BM25 scoring
-        4. Fusion
-        5. Возвращаем top_k
-
-        Args:
-            query (str): Запрос пользователя
-            top_k (int): Количество результатов
-
-        Returns:
-            List[SearchResult]: Итоговые документы
-        """
 
         self.build_corpus()
 
         query_vec = self.embedder.encode_queries([query])[0]
-        dense_hits = self.dense.search(query_vec, k=top_k * 3)
+
+        dense_hits = self.dense.search(query_vec, k=top_k * 5)
 
         if not dense_hits:
             return []
 
         sparse_scores = self.sparse.search(query, self._corpus, k=len(self._corpus))
 
-        aligned_sparse = []
-        for d in dense_hits:
-            idx = self._id_map.get(str(d.id))
-            aligned_sparse.append(sparse_scores[idx] if idx is not None else 0.0)
+        sparse_dict = {
+            self._reverse_id_map[i]: score
+            for i, score in enumerate(sparse_scores)
+        }
 
-        fused = self.fusion.fuse(dense_hits, aligned_sparse)
+        for d in dense_hits:
+            if str(d.id) not in sparse_dict:
+                try:
+                    idx = self._corpus.index(d.text)
+                    sparse_dict[str(d.id)] = sparse_scores[idx]
+                except ValueError:
+                    sparse_dict[str(d.id)] = 0.0
+
+        fused = self.fusion.fuse(dense_hits, sparse_dict)
 
         return fused[:top_k]
+
+    def debug_query(self, query: str, top_k: int = 10) -> None:
+        print("\n" + "=" * 80)
+        print(f"[QUERY]: {query}")
+
+        self.build_corpus()
+
+        query_vec = self.embedder.encode_queries([query])[0]
+
+        dense_hits = self.dense.search(query_vec, k=top_k * 5)
+
+        print(f"\n[DENSE TOP {top_k}]")
+        for i, d in enumerate(dense_hits[:top_k]):
+            print(f"{i + 1}. score={d.score:.4f} | id={d.id}")
+            print(f"   text: {d.text}...\n")
+
+        sparse_scores = self.sparse.search(query, self._corpus, k=len(self._corpus))
+
+        top_sparse_idx = sorted(
+            range(len(sparse_scores)),
+            key=lambda i: sparse_scores[i],
+            reverse=True
+        )[:top_k]
+
+        print(f"\n[BM25 TOP {top_k}]")
+        for rank, idx in enumerate(top_sparse_idx):
+            doc_id = self._reverse_id_map[idx]
+            print(f"{rank + 1}. score={sparse_scores[idx]:.4f} | id={doc_id}")
+            print(f"   text: {self._corpus[idx]}...\n")
+
+        # Mapping
+        sparse_dict = {
+            self._reverse_id_map[i]: score
+            for i, score in enumerate(sparse_scores)
+        }
+
+        print(f"\n[ALIGNMENT CHECK]")
+        for d in dense_hits[:top_k]:
+            s = sparse_dict.get(str(d.id), None)
+            print(f"id={d.id} | dense={d.score:.4f} | sparse={s}")
+
+        fused = self.fusion.fuse(dense_hits, sparse_dict)
+
+        print(f"\n[FUSED TOP {top_k}]")
+        for i, f in enumerate(fused[:top_k]):
+            print(f"{i + 1}. score={f.score:.4f} | id={f.id}")
+            print(f"   text: {f.text}...\n")
+
+        print("=" * 80)

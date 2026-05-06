@@ -1,271 +1,233 @@
 import re
-from abc import abstractmethod, ABC
-from typing import List
+import hashlib
+from typing import List, Dict
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from classic_rag.Hybrid.rag_config import Chunk, ChunkMetadata
 
 
-class BaseChunker(ABC):
+class Sectioner:
 
-    SENTENCE_SPLIT_REGEX = re.compile(r"(?<=[.!?])\s+")
-    YAML_PATTERN = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
-    SECTION_SPLIT = re.compile(r"\n---\n")
+    def extract_sections(self, text: str) -> List[Dict]:
+        sections = []
+        current = {"header": None, "level": 0, "content": []}
 
-    def _normalize(self, text: str) -> str:
-        return re.sub(r"\n{3,}", "\n\n", (text or "").strip())
+        for line in text.split("\n"):
+            line = line.rstrip()
 
-    def _split_sentences(self, text: str) -> List[str]:
-        return self.SENTENCE_SPLIT_REGEX.split(text)
+            if not line.strip():
+                continue
 
-    def _strip_yaml(self, text: str) -> str:
-        """
-        Удаляет YAML metadata в начале markdown файла
-        """
-        return self.YAML_PATTERN.sub("", text).strip()
+            match = re.match(r'^(#{1,6})\s+(.+)', line)
 
-    def _split_sections(self, text: str) -> List[str]:
-        """
-        Делит текст по --- (логические блоки)
-        """
-        parts = self.SECTION_SPLIT.split(text)
-        return [p.strip() for p in parts if p.strip()]
+            if match:
+                if current["content"]:
+                    sections.append(current)
 
-    @abstractmethod
-    def split(self, text: str, *, source: str | None = None) -> List[Chunk]:
-        pass
+                current = {
+                    "header": match.group(2).strip(),
+                    "level": len(match.group(1)),
+                    "content": []
+                }
+            else:
+                current["content"].append(line)
 
-class SentenceChunker(BaseChunker):
+        if current["content"]:
+            sections.append(current)
 
-    def __init__(self, chunk_size: int = 800, overlap_sentences: int = 2):
-        self.chunk_size = chunk_size
-        self.overlap_sentences = overlap_sentences
+        return sections
 
-    def split(self, text: str, *, source: str | None = None) -> List[Chunk]:
 
-        text = self._normalize(text)
+class ContextInjector:
+
+    def inject(self, header: str, text: str) -> str:
+        if not header:
+            return text
+
+        return f"[{header}] {text}"
+
+
+class ChunkValidator:
+
+    def __init__(self, min_chars: int = 150, min_words: int = 25):
+        self.min_chars = min_chars
+        self.min_words = min_words
+
+    def is_valid(self, text: str) -> bool:
+        text = text.strip()
+
         if not text:
+            return False
+
+        if len(text) < self.min_chars:
+            return False
+
+        if len(text.split()) < self.min_words:
+            return False
+
+        alpha_ratio = sum(c.isalpha() for c in text) / max(len(text), 1)
+        if alpha_ratio < 0.25:
+            return False
+
+        return True
+
+class SemanticMerger:
+
+    def __init__(self, max_size: int = 900):
+        self.max_size = max_size
+
+    def _is_list(self, text: str) -> bool:
+        return bool(re.match(r"^\s*[-•*]\s+", text))
+
+    def merge(self, chunks: list[str]) -> list[str]:
+        if not chunks:
             return []
 
-        sentences = self._split_sentences(text)
+        merged = []
+        buffer = ""
 
-        chunks: List[Chunk] = []
-        current = []
-        current_len = 0
+        for chunk in chunks:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
 
-        for sent in sentences:
-            sent_len = len(sent)
+            if not buffer:
+                buffer = chunk
+                continue
 
-            if current_len + sent_len > self.chunk_size:
+            if self._is_list(buffer) != self._is_list(chunk):
+                merged.append(buffer)
+                buffer = chunk
+                continue
 
-                chunk_text = " ".join(current).strip()
+            if buffer.endswith(".") and len(chunk) > 180:
+                merged.append(buffer)
+                buffer = chunk
+                continue
 
-                if len(chunk_text) > 120:
-                    chunks.append(
-                        Chunk(
-                            text=chunk_text,
-                            metadata=ChunkMetadata(
-                                source=source or "",
-                                file="",
-                                chunk_type="sentence",
-                                header=None,
-                                level=None,
-                                article_number=None,
-                                topics=[]
-                            )
-                        )
-                    )
+            if len(buffer) + len(chunk) <= self.max_size:
+                buffer += " " + chunk
+            else:
+                merged.append(buffer)
+                buffer = chunk
 
-                current = current[-self.overlap_sentences:]
-                current_len = sum(len(x) for x in current)
+        if buffer:
+            merged.append(buffer)
 
-            current.append(sent)
-            current_len += sent_len
-
-        if current:
-            chunk_text = " ".join(current).strip()
-
-            if len(chunk_text) > 120:
-                chunks.append(
-                    Chunk(
-                        text=chunk_text,
-                        metadata=ChunkMetadata(
-                            source=source or "",
-                            file="",
-                            chunk_type="sentence",
-                            header=None,
-                            level=None,
-                            article_number=None,
-                            topics=[]
-                        )
-                    )
-                )
-
-        return chunks
+        return merged
 
 
-class WindowChunker(BaseChunker):
+class HybridLegalChunker:
 
-    def __init__(self, max_chars: int = 800, overlap: int = 150):
-        self.max_chars = max_chars
-        self.overlap = overlap
+    def __init__(self, chunk_size=800, chunk_overlap=120):
 
-    def split(self, text: str, *, source: str | None = None):
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", "; "],
+        )
 
-        text = self._normalize(text)
-        if not text:
+        self.sectioner = Sectioner()
+        self.injector = ContextInjector()
+        self.validator = ChunkValidator()
+        self.merger = SemanticMerger(chunk_size)
+
+    def _extract_article(self, header, frontmatter):
+        if header:
+            m = re.search(r'Статья\s+(\d+)', header)
+            if m:
+                return m.group(1)
+
+        doc_id = frontmatter.get("id", "")
+        m = re.search(r'article_(\d+)', doc_id)
+        if m:
+            return m.group(1)
+
+        return frontmatter.get("article")
+
+    def _make_chunk_id(self, text: str, filepath: str, index: int) -> str:
+        raw = f"{filepath}:{index}:{text[:200]}"
+        return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    def build_metadata(self, header, frontmatter, filepath, level, article_number, chunk_index):
+
+        return ChunkMetadata(
+            source=frontmatter.get("source", "unknown"),
+            file=filepath.split("/")[-1],
+            header=header,
+            level=level,
+            article_number=article_number,
+            chunk_index=chunk_index,
+            topics=(frontmatter.get("classic_rag", {}) or {}).get("topics", []),
+        )
+
+    def process_section(self, section, base_metadata, filepath):
+
+        header = section["header"]
+
+        raw_text = "\n".join(section["content"]).strip()
+        if not raw_text:
             return []
+
+        full_text = self.injector.inject(header, raw_text)
+
+        raw_parts = self.splitter.split_text(full_text)
+        merged_parts = self.merger.merge(raw_parts)
 
         chunks = []
-        step = max(1, self.max_chars - self.overlap)
 
-        for start in range(0, len(text), step):
-            end = min(start + self.max_chars, len(text))
-            piece = text[start:end].strip()
+        for i, part in enumerate(merged_parts):
+            part = part.strip()
 
-            if piece:
-                chunks.append(
-                    Chunk(
-                        text=piece,
-                        metadata=ChunkMetadata(
-                            source=source or "",
-                            file="",
-                            chunk_type="window",
-                            header=None,
-                            level=None,
-                            article_number=None,
-                            topics=[]
-                        )
-                    )
+            if not self.validator.is_valid(part):
+                continue
+
+            chunk_id = self._make_chunk_id(part, filepath, i)
+
+            metadata = ChunkMetadata(
+                source=base_metadata.source,
+                file=base_metadata.file,
+                header=base_metadata.header,
+                level=base_metadata.level,
+                article_number=base_metadata.article_number,
+                chunk_index=i,
+                topics=base_metadata.topics
+            )
+
+            chunks.append(
+                Chunk(
+                    chunk_id=chunk_id,
+                    text=part,
+                    metadata=metadata
                 )
+            )
 
         return chunks
 
+    def create_chunks(self, sections, frontmatter, filepath):
 
-class StructureChunker(BaseChunker):
+        all_chunks = []
 
-    HEADER_PATTERN = re.compile(r"^(#{1,4})\s+(.+)", re.MULTILINE)
-    ARTICLE_PATTERN = re.compile(r"Статья\s+(\d+)")
+        for sec in sections:
 
-    def __init__(self, fallback_chunker: BaseChunker | None = None):
-        self.fallback = fallback_chunker
+            article_number = self._extract_article(sec["header"], frontmatter)
 
-    def split(self, text: str, *, source: str | None = None):
+            metadata = self.build_metadata(
+                header=sec["header"],
+                frontmatter=frontmatter,
+                filepath=filepath,
+                level=sec["level"],
+                article_number=article_number,
+                chunk_index=0
+            )
 
-        text = self._strip_yaml(text)
-        text = self._normalize(text)
+            all_chunks.extend(
+                self.process_section(sec, metadata, filepath)
+            )
 
-        if not text:
-            return []
+        return all_chunks
 
-        sections = self._split_sections(text)
-        chunks = []
+    def process(self, filepath: str, frontmatter: dict, body: str):
 
-        current_article = None
-
-        for section in sections:
-
-            article_match = self.ARTICLE_PATTERN.search(section)
-            if article_match:
-                current_article = article_match.group(1)
-
-            matches: List[re.Match[str]] = list(self.HEADER_PATTERN.finditer(section))
-
-            if not matches:
-                if self.fallback:
-                    fallback_chunks = self.fallback.split(section, source=source)
-                    for fc in fallback_chunks:
-                        fc.metadata.article_number = current_article
-                        chunks.append(fc)
-                continue
-
-            i = 0
-            while i < len(matches):
-
-                current = matches[i]
-                start = current.start()
-                level = len(current.group(1))
-                header = current.group(2).strip()
-
-                j = i + 1
-
-                while j < len(matches):
-                    next_level = len(matches[j].group(1))
-
-                    if next_level <= level:
-                        break
-
-                    j += 1
-
-                end = matches[j].start() if j < len(matches) else len(section)
-
-                block = section[start:end].strip()
-
-                if len(block) < 80:
-                    i = j
-                    continue
-
-                chunks.append(
-                    Chunk(
-                        text=block,
-                        metadata=ChunkMetadata(
-                            source=source or "",
-                            file="",
-                            chunk_type="structure",
-                            header=header,
-                            level=level,
-                            article_number=current_article,
-                            topics=[]
-                        )
-                    )
-                )
-
-                i = j
-
-        return chunks
-
-class SmartChunker(BaseChunker):
-
-    def __init__(
-        self,
-        structure_chunker: StructureChunker,
-        sentence_chunker: SentenceChunker,
-        window_chunker: WindowChunker,
-        max_chars: int = 800
-    ):
-        self.structure = structure_chunker
-        self.sentence = sentence_chunker
-        self.window = window_chunker
-        self.max_chars = max_chars
-
-    def split(self, text: str, *, source: str | None = None):
-
-        structured = self.structure.split(text, source=source)
-
-        final_chunks = []
-
-        for chunk in structured:
-
-            if len(chunk.text) <= self.max_chars:
-                final_chunks.append(chunk)
-                continue
-
-            sentence_chunks = self.sentence.split(chunk.text, source=source)
-
-            if sentence_chunks:
-                for sc in sentence_chunks:
-                    sc.metadata.header = chunk.metadata.header
-                    sc.metadata.level = chunk.metadata.level
-                    sc.metadata.article_number = chunk.metadata.article_number
-                    final_chunks.append(sc)
-                continue
-
-            window_chunks = self.window.split(chunk.text, source=source)
-
-            for wc in window_chunks:
-                wc.metadata.header = chunk.metadata.header
-                wc.metadata.level = chunk.metadata.level
-                wc.metadata.article_number = chunk.metadata.article_number
-                final_chunks.append(wc)
-
-        return final_chunks
-    
+        sections = self.sectioner.extract_sections(body)
+        return self.create_chunks(sections, frontmatter, filepath)
