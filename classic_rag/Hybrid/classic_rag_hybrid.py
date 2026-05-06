@@ -228,6 +228,7 @@ class ClassicRAG:
 if __name__ == "__main__":
 
     rag = ClassicRAG()
+    retriever = rag.rag_service.retriever
 
     try:
         questions = [
@@ -239,6 +240,9 @@ if __name__ == "__main__":
 
         for q in questions:
             print("\nQ:", q)
+            retriever.debug_query(q, top_k=10)
+            res = rag.ask(q)
+            print("A:", res.answer)
             res = rag.ask(q)
             print("A:", res.answer)
 
