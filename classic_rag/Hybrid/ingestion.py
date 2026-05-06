@@ -1,11 +1,10 @@
 from abc import abstractmethod, ABC
 from pathlib import Path
-from typing import List, Tuple, Dict, Any
+from typing import List
 
-import yaml
 from langchain_core.documents import Document
 
-from classic_rag.Hybrid.rag_config import Chunk, ChunkMetadata
+from classic_rag.Hybrid.rag_config import Chunk
 
 
 class BaseDocumentLoader(ABC):
@@ -14,68 +13,14 @@ class BaseDocumentLoader(ABC):
     def load(self) -> List[Document]:
         raise NotImplementedError
 
-class MarkdownDocumentLoader(BaseDocumentLoader):
-
+class MarkdownDocumentLoader:
     def __init__(self, data_dir: str):
         self.data_dir = Path(data_dir)
 
-    def load(self) -> List[Document]:
-        docs: List[Document] = []
-
-        for file_path in self.data_dir.rglob("*.md"):
-            try:
-                raw = file_path.read_text(encoding="utf-8")
-            except Exception:
-                continue
-
-            metadata, content = self._parse_markdown(raw)
-
-            content = (content or "").strip()
-            if not content:
-                continue
-
-            classic = metadata.get("classic_rag", {}) or {}
-            topics = classic.get("topics", []) if isinstance(classic, dict) else []
-
-            docs.append(
-                Document(
-                    page_content=content,
-                    metadata={
-                        "source": str(file_path),
-                        "file": file_path.name,
-                        "topics": topics,
-                        "classic_rag": classic
-                    }
-                )
-            )
-
-        print(f"Loaded docs: {len(docs)}")
-        return docs
-
-    def _parse_markdown(self, text: str) -> Tuple[Dict[str, Any], str]:
-        if not text.startswith("---"):
-            return {}, text
-
-        try:
-            parts = text.split("---", 2)
-            if len(parts) < 3:
-                return {}, text
-
-            meta_raw = yaml.safe_load(parts[1]) or {}
-            if not isinstance(meta_raw, dict):
-                meta_raw = {}
-
-            content = parts[2]
-
-            classic = meta_raw.get("classic_rag", {})
-            if not isinstance(classic, dict):
-                classic = {}
-
-            return {"classic_rag": classic}, content
-
-        except Exception:
-            return {}, text
-
+    def load(self) -> List[Path]:
+        files = list(self.data_dir.rglob("*.md"))
+        print(f"[Loader] Found files: {len(files)}")
+        return files
 
 class IngestionPipeline:
     def __init__(self, loader, chunker):
@@ -83,43 +28,18 @@ class IngestionPipeline:
         self.chunker = chunker
 
     def run(self) -> List[Chunk]:
-        docs = self.loader.load()
+        files = self.loader.load()
 
-        if not docs:
+        if not files:
             return []
 
         chunks: List[Chunk] = []
 
-        for doc in docs:
-            text = (doc.page_content or "").strip()
+        for path in files:
+            file_chunks = self.chunker.process(str(path))
+            chunks.extend(file_chunks)
 
-            if not text:
-                continue
+        chunks = [c for c in chunks if (c.text or "").strip()]
 
-            source = doc.metadata.get("source", "")
-            file = doc.metadata.get("file", "")
-            topics = doc.metadata.get("topics", [])
 
-            chunked = self.chunker.split(text, source=source)
-
-            for ch in chunked:
-
-                meta = ChunkMetadata(
-                    source=source,
-                    file=file,
-                    chunk_type=ch.metadata.chunk_type,
-                    header=ch.metadata.header,
-                    level=ch.metadata.level,
-                    article_number=ch.metadata.article_number,
-                    topics=topics,
-                )
-
-                chunks.append(
-                    Chunk(
-                        text=ch.text.strip(),
-                        metadata=meta,
-                        chunk_id=ch.chunk_id
-                    )
-                )
-
-        return [c for c in chunks if c.text.strip()]
+        return chunks

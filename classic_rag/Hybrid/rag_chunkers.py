@@ -2,270 +2,98 @@ import re
 from abc import abstractmethod, ABC
 from typing import List
 
+import yaml
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from classic_rag.Hybrid.rag_config import Chunk, ChunkMetadata
 
 
-class BaseChunker(ABC):
-
-    SENTENCE_SPLIT_REGEX = re.compile(r"(?<=[.!?])\s+")
-    YAML_PATTERN = re.compile(r"^---\n.*?\n---\n", re.DOTALL)
-    SECTION_SPLIT = re.compile(r"\n---\n")
-
-    def _normalize(self, text: str) -> str:
-        return re.sub(r"\n{3,}", "\n\n", (text or "").strip())
-
-    def _split_sentences(self, text: str) -> List[str]:
-        return self.SENTENCE_SPLIT_REGEX.split(text)
-
-    def _strip_yaml(self, text: str) -> str:
-        """
-        Удаляет YAML metadata в начале markdown файла
-        """
-        return self.YAML_PATTERN.sub("", text).strip()
-
-    def _split_sections(self, text: str) -> List[str]:
-        """
-        Делит текст по --- (логические блоки)
-        """
-        parts = self.SECTION_SPLIT.split(text)
-        return [p.strip() for p in parts if p.strip()]
-
-    @abstractmethod
-    def split(self, text: str, *, source: str | None = None) -> List[Chunk]:
-        pass
-
-class SentenceChunker(BaseChunker):
-
-    def __init__(self, chunk_size: int = 800, overlap_sentences: int = 2):
+class SimpleMarkdownParser:
+    def __init__(self, chunk_size: int = 800, chunk_overlap: int = 100):
         self.chunk_size = chunk_size
-        self.overlap_sentences = overlap_sentences
+        self.splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n### ", "\n## ", "\n\n", "\n", " ", ""],
+        )
 
-    def split(self, text: str, *, source: str | None = None) -> List[Chunk]:
+    def parse_file(self, filepath: str):
+        with open(filepath, "r", encoding="utf-8") as f:
+            content = f.read()
 
-        text = self._normalize(text)
-        if not text:
-            return []
+        match = re.match(r'^---\n(.*?)\n---\n(.*)$', content, re.DOTALL)
 
-        sentences = self._split_sentences(text)
+        if match:
+            frontmatter = yaml.safe_load(match.group(1)) or {}
+            body = match.group(2)
+        else:
+            frontmatter = {}
+            body = content
 
-        chunks: List[Chunk] = []
-        current = []
-        current_len = 0
+        return frontmatter, body
 
-        for sent in sentences:
-            sent_len = len(sent)
+    def extract_sections(self, text: str):
+        sections = []
+        current = {"header": None, "level": 0, "content": []}
 
-            if current_len + sent_len > self.chunk_size:
+        for line in text.split("\n"):
+            match = re.match(r'^(#+)\s+(.+)', line)
 
-                chunk_text = " ".join(current).strip()
+            if match:
+                if current["content"]:
+                    sections.append(current)
 
-                if len(chunk_text) > 120:
-                    chunks.append(
-                        Chunk(
-                            text=chunk_text,
-                            metadata=ChunkMetadata(
-                                source=source or "",
-                                file="",
-                                chunk_type="sentence",
-                                header=None,
-                                level=None,
-                                article_number=None,
-                                topics=[]
-                            )
-                        )
-                    )
+                current = {
+                    "header": match.group(2),
+                    "level": len(match.group(1)),
+                    "content": []
+                }
+            else:
+                current["content"].append(line)
 
-                current = current[-self.overlap_sentences:]
-                current_len = sum(len(x) for x in current)
+        if current["content"]:
+            sections.append(current)
 
-            current.append(sent)
-            current_len += sent_len
+        return sections
 
-        if current:
-            chunk_text = " ".join(current).strip()
+    def extract_article_number(self, header: str, frontmatter: dict):
+        if header:
+            m = re.search(r'Статья\s+(\d+)', header)
+            if m:
+                return m.group(1)
 
-            if len(chunk_text) > 120:
-                chunks.append(
-                    Chunk(
-                        text=chunk_text,
-                        metadata=ChunkMetadata(
-                            source=source or "",
-                            file="",
-                            chunk_type="sentence",
-                            header=None,
-                            level=None,
-                            article_number=None,
-                            topics=[]
-                        )
-                    )
-                )
+        doc_id = frontmatter.get("id", "")
+        m = re.search(r'article_(\d+)', doc_id)
+        return m.group(1) if m else None
 
-        return chunks
-
-
-class WindowChunker(BaseChunker):
-
-    def __init__(self, max_chars: int = 800, overlap: int = 150):
-        self.max_chars = max_chars
-        self.overlap = overlap
-
-    def split(self, text: str, *, source: str | None = None):
-
-        text = self._normalize(text)
-        if not text:
-            return []
-
-        chunks = []
-        step = max(1, self.max_chars - self.overlap)
-
-        for start in range(0, len(text), step):
-            end = min(start + self.max_chars, len(text))
-            piece = text[start:end].strip()
-
-            if piece:
-                chunks.append(
-                    Chunk(
-                        text=piece,
-                        metadata=ChunkMetadata(
-                            source=source or "",
-                            file="",
-                            chunk_type="window",
-                            header=None,
-                            level=None,
-                            article_number=None,
-                            topics=[]
-                        )
-                    )
-                )
-
-        return chunks
-
-
-class StructureChunker(BaseChunker):
-
-    HEADER_PATTERN = re.compile(r"^(#{1,4})\s+(.+)", re.MULTILINE)
-    ARTICLE_PATTERN = re.compile(r"Статья\s+(\d+)")
-
-    def __init__(self, fallback_chunker: BaseChunker | None = None):
-        self.fallback = fallback_chunker
-
-    def split(self, text: str, *, source: str | None = None):
-
-        text = self._strip_yaml(text)
-        text = self._normalize(text)
-
-        if not text:
-            return []
-
-        sections = self._split_sections(text)
+    def create_chunks(self, sections, frontmatter):
         chunks = []
 
-        current_article = None
-
-        for section in sections:
-
-            article_match = self.ARTICLE_PATTERN.search(section)
-            if article_match:
-                current_article = article_match.group(1)
-
-            matches: List[re.Match[str]] = list(self.HEADER_PATTERN.finditer(section))
-
-            if not matches:
-                if self.fallback:
-                    fallback_chunks = self.fallback.split(section, source=source)
-                    for fc in fallback_chunks:
-                        fc.metadata.article_number = current_article
-                        chunks.append(fc)
+        for sec in sections:
+            text = "\n".join(sec["content"]).strip()
+            if not text:
                 continue
 
-            i = 0
-            while i < len(matches):
+            article_number = self.extract_article_number(sec["header"], frontmatter)
 
-                current = matches[i]
-                start = current.start()
-                level = len(current.group(1))
-                header = current.group(2).strip()
+            base_metadata = ChunkMetadata(
+                source=frontmatter.get("source", "unknown"),
+                file=frontmatter.get("file", "unknown.md"),
+                header=sec["header"],
+                level=sec["level"],
+                article_number=article_number,
+                topics=frontmatter.get("classic_rag", {}).get("topics", [])
+            )
 
-                j = i + 1
-
-                while j < len(matches):
-                    next_level = len(matches[j].group(1))
-
-                    if next_level <= level:
-                        break
-
-                    j += 1
-
-                end = matches[j].start() if j < len(matches) else len(section)
-
-                block = section[start:end].strip()
-
-                if len(block) < 80:
-                    i = j
-                    continue
-
-                chunks.append(
-                    Chunk(
-                        text=block,
-                        metadata=ChunkMetadata(
-                            source=source or "",
-                            file="",
-                            chunk_type="structure",
-                            header=header,
-                            level=level,
-                            article_number=current_article,
-                            topics=[]
-                        )
-                    )
-                )
-
-                i = j
+            if len(text) <= self.chunk_size:
+                chunks.append(Chunk(text=text, metadata=base_metadata))
+            else:
+                for part in self.splitter.split_text(text):
+                    chunks.append(Chunk(text=part, metadata=base_metadata))
 
         return chunks
 
-class SmartChunker(BaseChunker):
-
-    def __init__(
-        self,
-        structure_chunker: StructureChunker,
-        sentence_chunker: SentenceChunker,
-        window_chunker: WindowChunker,
-        max_chars: int = 800
-    ):
-        self.structure = structure_chunker
-        self.sentence = sentence_chunker
-        self.window = window_chunker
-        self.max_chars = max_chars
-
-    def split(self, text: str, *, source: str | None = None):
-
-        structured = self.structure.split(text, source=source)
-
-        final_chunks = []
-
-        for chunk in structured:
-
-            if len(chunk.text) <= self.max_chars:
-                final_chunks.append(chunk)
-                continue
-
-            sentence_chunks = self.sentence.split(chunk.text, source=source)
-
-            if sentence_chunks:
-                for sc in sentence_chunks:
-                    sc.metadata.header = chunk.metadata.header
-                    sc.metadata.level = chunk.metadata.level
-                    sc.metadata.article_number = chunk.metadata.article_number
-                    final_chunks.append(sc)
-                continue
-
-            window_chunks = self.window.split(chunk.text, source=source)
-
-            for wc in window_chunks:
-                wc.metadata.header = chunk.metadata.header
-                wc.metadata.level = chunk.metadata.level
-                wc.metadata.article_number = chunk.metadata.article_number
-                final_chunks.append(wc)
-
-        return final_chunks
-    
+    def process(self, filepath: str):
+        fm, body = self.parse_file(filepath)
+        sections = self.extract_sections(body)
+        return self.create_chunks(sections, fm)

@@ -474,7 +474,7 @@ class Retriever:
         print(f"\n[DENSE TOP {top_k}]")
         for i, d in enumerate(dense_hits[:top_k]):
             print(f"{i + 1}. score={d.score:.4f} | id={d.id}")
-            print(f"   text: {d.text[:120]}...\n")
+            print(f"   text: {d.text}...\n")
 
         sparse_scores = self.sparse.search(query, self._corpus, k=len(self._corpus))
 
@@ -488,7 +488,7 @@ class Retriever:
         for rank, idx in enumerate(top_sparse_idx):
             doc_id = self._reverse_id_map[idx]
             print(f"{rank + 1}. score={sparse_scores[idx]:.4f} | id={doc_id}")
-            print(f"   text: {self._corpus[idx][:120]}...\n")
+            print(f"   text: {self._corpus[idx]}...\n")
 
         # Mapping
         sparse_dict = {
@@ -506,6 +506,6 @@ class Retriever:
         print(f"\n[FUSED TOP {top_k}]")
         for i, f in enumerate(fused[:top_k]):
             print(f"{i + 1}. score={f.score:.4f} | id={f.id}")
-            print(f"   text: {f.text[:120]}...\n")
+            print(f"   text: {f.text}...\n")
 
         print("=" * 80)
