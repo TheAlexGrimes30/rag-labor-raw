@@ -4,119 +4,15 @@ from typing import List
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
-from classic_rag.Hybrid.ingestion import IngestionPipeline, MarkdownDocumentLoader
+from classic_rag.Hybrid.index_service import IndexService
+from classic_rag.Hybrid.ingestion import IngestionPipeline, MarkdownDocumentLoader, IngestionService
 from classic_rag.Hybrid.rag_chunkers import HybridLegalChunker
-from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
+from classic_rag.Hybrid.rag_config import RAGResponse, Chunk
+from classic_rag.Hybrid.rag_service import RAGService
 from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
 
-class IngestionService:
-    def __init__(self, pipeline: IngestionPipeline):
-        self.pipeline = pipeline
-
-    def load_chunks(self) -> List[Chunk]:
-        chunks = self.pipeline.run()
-        print(f"[Ingestion] Loaded chunks: {len(chunks)}")
-        return chunks
-
-class IndexService:
-    def __init__(self, vector_store: VectorStore, embedder: Embedder):
-        self.vector_store = vector_store
-        self.embedder = embedder
-
-    def index(self, chunks: List[Chunk]) -> None:
-        if not chunks:
-            return
-
-        texts = [c.text for c in chunks]
-        payloads = [c.to_payload() for c in chunks]
-        ids = [c.chunk_id for c in chunks]
-
-        vectors = self.embedder.encode_passages(texts)
-
-        self.vector_store.upsert(ids, vectors, payloads)
-
-        print(f"[Index] Indexed: {len(chunks)} chunks")
-
-class RAGService:
-
-    def __init__(self, retriever, reranker, generator):
-        self.retriever = retriever
-        self.reranker = reranker
-        self.generator = generator
-
-    def ask(self, query: str) -> RAGResponse:
-
-        hits = self.retriever.retrieve(query, top_k=25)
-        hits = self._deduplicate(hits)
-
-        reranked = self.reranker.rerank(query=query, hits=hits, top_n=6)
-
-        context = self._build_context(reranked)
-
-        answer = self.generator.generate(query, context)
-
-        sources = list({
-            f"Статья {h.payload.get('article_number')}"
-            for h in reranked
-            if h.payload.get("article_number")
-        })
-
-        return RAGResponse(
-            answer=answer,
-            sources=sources
-        )
-
-    def _build_context(self, hits: List[SearchResult]) -> str:
-
-        grouped = {}
-
-        for h in hits:
-            article = h.payload.get("article_number") or "unknown"
-            grouped.setdefault(article, []).append(h)
-
-        parts = []
-
-        for article, items in grouped.items():
-
-            items = sorted(items, key=lambda x: x.score, reverse=True)
-
-            block = [f"СТАТЬЯ {article}"]
-
-            for h in items:
-                header = h.payload.get("header") or ""
-                text = (h.text or "").strip()
-
-                if len(text) < 30:
-                    continue
-
-                block.append(f"{header}\n{text}")
-
-            parts.append("\n\n".join(block))
-
-        return "\n\n---\n\n".join(parts)
-
-    def _deduplicate(self, hits: List[SearchResult]) -> List[SearchResult]:
-
-        seen = set()
-        result = []
-
-        for h in hits:
-            text = (h.text or "").strip()
-
-            if len(text) < 30:
-                continue
-
-            key = hash(text[:200])
-
-            if key in seen:
-                continue
-
-            seen.add(key)
-            result.append(h)
-
-        return result
 
 class ClassicRAG:
 
@@ -144,7 +40,7 @@ class ClassicRAG:
 
         vector_store = VectorStore(
             client=client,
-            collection_name="rag_qwen_collection",
+            collection_name="labor_rag_dense_collection",
             vector_size=embedder.dim
         )
 
@@ -264,10 +160,10 @@ if __name__ == "__main__":
         for q in questions:
             print("\nQ:", q)
             retriever.debug_query(q, top_k=10)
-            debug_chunks(chunks)
-            save_chunks_to_txt(chunks)
-            res = rag.ask(q)
-            print("A:", res.answer)
+            #debug_chunks(chunks)
+            #save_chunks_to_txt(chunks)
+            #retriever.debug_embedding_inputs(chunks)
+            #retriever.debug_query_embedding(q)
             res = rag.ask(q)
             print("A:", res.answer)
 

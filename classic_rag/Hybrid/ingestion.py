@@ -57,3 +57,12 @@ class IngestionPipeline:
             )
 
         return [c for c in chunks if c.text.strip()]
+
+class IngestionService:
+    def __init__(self, pipeline: IngestionPipeline):
+        self.pipeline = pipeline
+
+    def load_chunks(self) -> List[Chunk]:
+        chunks = self.pipeline.run()
+        print(f"[Ingestion] Loaded chunks: {len(chunks)}")
+        return chunks
