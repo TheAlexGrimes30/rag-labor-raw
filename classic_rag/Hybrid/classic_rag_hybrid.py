@@ -4,21 +4,12 @@ from typing import List
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
-from classic_rag.Hybrid.ingestion import IngestionPipeline, MarkdownDocumentLoader
+from classic_rag.Hybrid.ingestion import IngestionPipeline, MarkdownDocumentLoader, IngestionService
 from classic_rag.Hybrid.rag_chunkers import HybridLegalChunker
 from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult, Chunk
 from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
-
-class IngestionService:
-    def __init__(self, pipeline: IngestionPipeline):
-        self.pipeline = pipeline
-
-    def load_chunks(self) -> List[Chunk]:
-        chunks = self.pipeline.run()
-        print(f"[Ingestion] Loaded chunks: {len(chunks)}")
-        return chunks
 
 class IndexService:
     def __init__(self, vector_store: VectorStore, embedder: Embedder):
