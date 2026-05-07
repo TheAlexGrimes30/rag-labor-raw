@@ -41,82 +41,133 @@ class IndexService:
 
 class RAGService:
 
-    def __init__(self, retriever, reranker, generator):
+    def __init__(
+        self,
+        retriever,
+        reranker,
+        generator,
+        max_context_chars: int = 12000
+    ):
         self.retriever = retriever
         self.reranker = reranker
         self.generator = generator
 
+        self.max_context_chars = max_context_chars
+
+
     def ask(self, query: str) -> RAGResponse:
 
-        hits = self.retriever.retrieve(query, top_k=25)
-        hits = self._deduplicate(hits)
+        hits = self.retriever.retrieve(
+            query,
+            top_k=25
+        )
 
-        reranked = self.reranker.rerank(query=query, hits=hits, top_n=6)
+        reranked = self.reranker.rerank(
+            query=query,
+            hits=hits,
+            top_n=8
+        )
 
         context = self._build_context(reranked)
 
-        answer = self.generator.generate(query, context)
+        answer = self.generator.generate(
+            query=query,
+            context=context
+        )
 
-        sources = list({
-            f"Статья {h.payload.get('article_number')}"
-            for h in reranked
-            if h.payload.get("article_number")
-        })
+        sources = self._build_sources(
+            reranked
+        )
 
         return RAGResponse(
             answer=answer,
             sources=sources
         )
 
-    def _build_context(self, hits: List[SearchResult]) -> str:
-
-        grouped = {}
-
-        for h in hits:
-            article = h.payload.get("article_number") or "unknown"
-            grouped.setdefault(article, []).append(h)
+    def _build_context(
+        self,
+        hits: List[SearchResult]
+    ) -> str:
 
         parts = []
 
-        for article, items in grouped.items():
+        current_size = 0
 
-            items = sorted(items, key=lambda x: x.score, reverse=True)
+        for i, h in enumerate(hits, start=1):
 
-            block = [f"СТАТЬЯ {article}"]
+            article = h.payload.get(
+                "article_number",
+                "?"
+            )
 
-            for h in items:
-                header = h.payload.get("header") or ""
-                text = (h.text or "").strip()
+            header = h.payload.get(
+                "header",
+                ""
+            )
 
-                if len(text) < 30:
-                    continue
+            score = round(
+                float(h.score),
+                4
+            )
 
-                block.append(f"{header}\n{text}")
-
-            parts.append("\n\n".join(block))
-
-        return "\n\n---\n\n".join(parts)
-
-    def _deduplicate(self, hits: List[SearchResult]) -> List[SearchResult]:
-
-        seen = set()
-        result = []
-
-        for h in hits:
             text = (h.text or "").strip()
 
             if len(text) < 30:
                 continue
 
-            key = hash(text[:200])
+            block = f"""
+            [Источник #{i}]
+            [Релевантность: {score}]
+            
+            Статья: {article}
+            Раздел: {header}
+            
+            {text}
+            """.strip()
+
+            if current_size + len(block) > self.max_context_chars:
+                break
+
+            parts.append(block)
+
+            current_size += len(block)
+
+        return "\n\n-------------------\n\n".join(parts)
+
+    def _build_sources(
+        self,
+        hits: List[SearchResult]
+    ) -> List[str]:
+
+        seen = set()
+        sources = []
+
+        for h in hits:
+
+            article = h.payload.get(
+                "article_number"
+            )
+
+            header = h.payload.get(
+                "header",
+                ""
+            )
+
+            if not article:
+                continue
+
+            key = (article, header)
 
             if key in seen:
                 continue
 
             seen.add(key)
-            result.append(h)
 
-        return result
+            sources.append(
+                f"Статья {article} — {header}"
+            )
+
+        return sources
 
 class ClassicRAG:
 
@@ -266,8 +317,8 @@ if __name__ == "__main__":
             retriever.debug_query(q, top_k=10)
             #debug_chunks(chunks)
             #save_chunks_to_txt(chunks)
-            retriever.debug_embedding_inputs(chunks)
-            retriever.debug_query_embedding(q)
+            #retriever.debug_embedding_inputs(chunks)
+            #retriever.debug_query_embedding(q)
             res = rag.ask(q)
             print("A:", res.answer)
 
