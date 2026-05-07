@@ -4,6 +4,7 @@ from typing import List
 from qdrant_client import QdrantClient
 
 from classic_rag.Hybrid.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
+from classic_rag.Hybrid.index_service import IndexService
 from classic_rag.Hybrid.ingestion import IngestionPipeline, MarkdownDocumentLoader, IngestionService
 from classic_rag.Hybrid.rag_chunkers import HybridLegalChunker
 from classic_rag.Hybrid.rag_config import RAGResponse, Chunk
@@ -11,25 +12,6 @@ from classic_rag.Hybrid.rag_service import RAGService
 from classic_rag.Hybrid.reranker import Reranker
 from classic_rag.Hybrid.retriever import Retriever, Embedder
 from classic_rag.Hybrid.storage import VectorStore
-
-class IndexService:
-    def __init__(self, vector_store: VectorStore, embedder: Embedder):
-        self.vector_store = vector_store
-        self.embedder = embedder
-
-    def index(self, chunks: List[Chunk]) -> None:
-        if not chunks:
-            return
-
-        texts = [c.text for c in chunks]
-        payloads = [c.to_payload() for c in chunks]
-        ids = [c.chunk_id for c in chunks]
-
-        vectors = self.embedder.encode_passages(texts)
-
-        self.vector_store.upsert(ids, vectors, payloads)
-
-        print(f"[Index] Indexed: {len(chunks)} chunks")
 
 
 class ClassicRAG:
