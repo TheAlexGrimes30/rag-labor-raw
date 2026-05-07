@@ -144,7 +144,7 @@ class ClassicRAG:
 
         vector_store = VectorStore(
             client=client,
-            collection_name="rag_qwen_collection",
+            collection_name="labor_rag_dense_collection",
             vector_size=embedder.dim
         )
 
@@ -264,10 +264,10 @@ if __name__ == "__main__":
         for q in questions:
             print("\nQ:", q)
             retriever.debug_query(q, top_k=10)
-            debug_chunks(chunks)
-            save_chunks_to_txt(chunks)
-            res = rag.ask(q)
-            print("A:", res.answer)
+            #debug_chunks(chunks)
+            #save_chunks_to_txt(chunks)
+            retriever.debug_embedding_inputs(chunks)
+            retriever.debug_query_embedding(q)
             res = rag.ask(q)
             print("A:", res.answer)
 
