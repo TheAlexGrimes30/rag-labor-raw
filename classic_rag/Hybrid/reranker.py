@@ -1,89 +1,127 @@
+from abc import ABC, abstractmethod
+from functools import lru_cache
+from typing import List, Tuple
+
 from sentence_transformers import CrossEncoder
 
-from classic_rag.Hybrid.rag_config import RerankMapper
+from classic_rag.Hybrid.rag_config import SearchResult
+
+
+class BaseReranker(ABC):
+
+    @abstractmethod
+    def rerank(
+            self,
+            query: str,
+            hits: List["SearchResult"],
+            *,
+            top_n: int
+    ) -> List["SearchResult"]:
+        raise NotImplementedError
 
 
 class Reranker:
-    """
-    CrossEncoder-based reranker for RAG pipeline.
-    Responsible only for scoring and ordering candidates.
-    """
 
-    def __init__(self, model_name: str = "Qwen/Qwen3-Reranker-0.6B"):
+    def __init__(
+            self,
+            model_name: str = "Qwen/Qwen3-Reranker-0.6B",
+            batch_size: int = 8,
+            max_length: int = 512,
+            top_n: int = 6
+    ):
+        self.model = self._load(model_name)
+        self.batch_size = batch_size
+        self.max_length = max_length
+        self.top_n = top_n
 
-        print(f"[Reranker] Loading model: {model_name}")
+    @staticmethod
+    @lru_cache(maxsize=1)
+    def _load(model_name: str) -> CrossEncoder:
+        model = CrossEncoder(model_name)
 
-        self.model = CrossEncoder(model_name)
+        tokenizer = model.tokenizer
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
-    def rerank(self, query: str, hits, top_n: int = 6):
-        """
-        Re-ranks retrieved documents using CrossEncoder relevance scoring.
-        """
+        model.model.config.pad_token_id = tokenizer.pad_token_id
+        return model
 
-        print(f"\n[Reranker] Query: {query}")
-        print(f"[Reranker] Input hits: {len(hits)}")
+    def rerank(
+            self,
+            query: str,
+            hits: List[SearchResult],
+            top_n: int | None = None
+    ) -> List[SearchResult]:
 
         if not hits:
             return []
 
-        # -------------------------
-        # 1. prepare safe input pairs
-        # -------------------------
-        pairs = [
-            (query, (h.text or "").strip())
-            for h in hits
-            if h.text and h.text.strip()
-        ]
+        top_n = top_n or self.top_n
 
-        if not pairs:
+        valid_hits = [h for h in hits if h.text and h.text.strip()]
+        if not valid_hits:
             return []
 
-        # -------------------------
-        # 2. model inference
-        # -------------------------
-        scores = list(
-            self.model.predict(
+        pairs = [self._build_pair(query, h) for h in valid_hits]
+
+        try:
+            scores = self.model.predict(
                 pairs,
-                batch_size=32
+                batch_size=self.batch_size,
+                show_progress_bar=False
             )
-        )
+        except Exception as e:
+            print(f"[Reranker ERROR] {e}")
+            return valid_hits[:top_n]
 
-        # -------------------------
-        # 3. sort by score
-        # -------------------------
-        ranked = sorted(
-            zip(hits, scores),
-            key=lambda x: x[1],
-            reverse=True
-        )
+        scored = [(hit, float(score)) for hit, score in zip(valid_hits, scores)]
+        ranked = sorted(scored, key=lambda x: x[1], reverse=True)
 
-        # -------------------------
-        # 4. map to SearchResult
-        # -------------------------
-        results = [
-            RerankMapper.map(hit, score)
-            for hit, score in ranked[:top_n]
+        reranked = [
+            SearchResult.from_rerank(base=h, score=score)
+            for h, score in ranked
         ]
 
-        print(f"[Reranker] Final top_n: {len(results)}")
+        return self._diversify(reranked, top_n)
 
-        return results
+    def _build_pair(self, query: str, doc: SearchResult) -> Tuple[str, str]:
 
-    def debug(self, query: str, hits):
-        """
-        Debug helper: prints reranked results.
-        """
+        header = doc.payload.get("header") or ""
+        article = doc.payload.get("article_number") or ""
+        text = self._truncate(doc.text)
 
-        ranked = self.rerank(query, hits, top_n=len(hits))
+        enriched_doc = f"""
+        Документ:
+        Статья {article}
+        Раздел: {header}
 
-        for i, h in enumerate(ranked):
+        Содержание:
+        {text}
+        """.strip()
 
-            print("\n" + "=" * 80)
-            print(f"RANK {i + 1}")
+        return query, enriched_doc
 
-            print("ARTICLE:", h.payload.get("article_number"))
-            print("HEADER:", h.payload.get("header"))
-            print("SOURCE:", h.source)
+    def _truncate(self, text: str) -> str:
+        if len(text) <= 1000:
+            return text
 
-            print("\nTEXT:")
-            print((h.text or "")[:500])
+        return text[:500] + "\n...\n" + text[-500:]
+
+    def _diversify(self, hits: List[SearchResult], top_n: int) -> List[SearchResult]:
+
+        selected = []
+        seen = set()
+
+        for h in hits:
+            key = (h.payload.get("header"), h.payload.get("article_number"))
+
+            if key in seen:
+                continue
+
+            selected.append(h)
+            seen.add(key)
+
+            if len(selected) >= top_n:
+                break
+
+        return selected
