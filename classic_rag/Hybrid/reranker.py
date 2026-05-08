@@ -196,3 +196,83 @@ class Reranker(BaseReranker):
                 break
 
         return selected
+
+    def debug_rerank(
+            self,
+            query: str,
+            hits: List[SearchResult],
+            top_n: int = 10
+    ):
+
+        print("\n" + "=" * 100)
+        print(f"[RERANK DEBUG]")
+        print(f"QUERY: {query}")
+        print("=" * 100)
+
+        if not hits:
+            print("No hits")
+            return
+
+        valid_hits = [
+            h for h in hits
+            if h.text and h.text.strip()
+        ]
+
+        if not valid_hits:
+            print("No valid hits")
+            return
+
+        pairs = [
+            self._build_pair(query, h)
+            for h in valid_hits
+        ]
+
+        try:
+
+            raw_scores = self.model.predict(
+                pairs,
+                batch_size=self.batch_size,
+                show_progress_bar=False,
+                convert_to_numpy=True
+            )
+
+        except Exception as e:
+
+            print(f"[DEBUG ERROR] {e}")
+            return
+
+        scored = []
+
+        for hit, raw_score in zip(valid_hits, raw_scores):
+            normalized = self._normalize_score(float(raw_score))
+
+            scored.append(
+                (
+                    hit,
+                    float(raw_score),
+                    normalized
+                )
+            )
+
+        scored.sort(
+            key=lambda x: x[2],
+            reverse=True
+        )
+
+        for idx, (hit, raw_score, norm_score) in enumerate(scored[:top_n], start=1):
+            payload = hit.payload or {}
+
+            article = payload.get("article_number", "unknown")
+            header = payload.get("header", "unknown")
+
+            print(f"\n[{idx}]")
+            print(f"RAW SCORE  : {raw_score:.4f}")
+            print(f"NORM SCORE : {norm_score:.4f}")
+            print(f"ARTICLE    : {article}")
+            print(f"HEADER     : {header}")
+            print(f"DENSE SCORE: {getattr(hit, 'score', 0):.4f}")
+
+            print("\nTEXT:")
+            print("-" * 80)
+            print((hit.text or "")[:1000])
+            print("-" * 80)
