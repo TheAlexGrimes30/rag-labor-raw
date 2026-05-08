@@ -147,6 +147,7 @@ if __name__ == "__main__":
 
     rag = ClassicRAG()
     retriever = rag.rag_service.retriever
+    reranker = rag.rag_service.reranker
     chunks = rag.chunks
 
     try:
@@ -160,6 +161,8 @@ if __name__ == "__main__":
         for q in questions:
             print("\nQ:", q)
             retriever.debug_query(q, top_k=10)
+            hits = retriever.retrieve(q, top_k=25)
+            reranker.debug_rerank(q, hits)
             #debug_chunks(chunks)
             #save_chunks_to_txt(chunks)
             #retriever.debug_embedding_inputs(chunks)
