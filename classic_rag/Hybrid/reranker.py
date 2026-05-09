@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from functools import lru_cache
 from typing import List, Tuple
+import re
 
 from sentence_transformers import CrossEncoder
 
@@ -26,14 +27,18 @@ class Reranker(BaseReranker):
         self,
         model_name: str = "Qwen/Qwen3-Reranker-0.6B",
         batch_size: int = 8,
-        max_length: int = 1024,
+        max_length: int = 512,
         top_n: int = 5,
-        rerank_weight: float = 0.65,
-        dense_weight: float = 0.35,
-        min_score: float = 0.55,
+        rerank_weight: float = 0.45,
+        dense_weight: float = 0.45,
+        lexical_weight: float = 0.10,
+        min_score: float = 0.68,
     ):
 
-        self.model = self._load(model_name)
+        self.model = self._load(
+            model_name,
+            max_length=max_length
+        )
 
         self.batch_size = batch_size
         self.max_length = max_length
@@ -41,16 +46,20 @@ class Reranker(BaseReranker):
 
         self.rerank_weight = rerank_weight
         self.dense_weight = dense_weight
+        self.lexical_weight = lexical_weight
 
         self.min_score = min_score
 
     @staticmethod
     @lru_cache(maxsize=1)
-    def _load(model_name: str) -> CrossEncoder:
+    def _load(
+        model_name: str,
+        max_length: int
+    ) -> CrossEncoder:
 
         model = CrossEncoder(
             model_name,
-            max_length=1024
+            max_length=max_length
         )
 
         tokenizer = model.tokenizer
@@ -58,7 +67,9 @@ class Reranker(BaseReranker):
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        model.model.config.pad_token_id = tokenizer.pad_token_id
+        model.model.config.pad_token_id = (
+            tokenizer.pad_token_id
+        )
 
         return model
 
@@ -70,6 +81,11 @@ class Reranker(BaseReranker):
     ) -> List[SearchResult]:
 
         if not hits:
+            return []
+
+        query = (query or "").strip()
+
+        if not query:
             return []
 
         top_n = top_n or self.top_n
@@ -112,11 +128,37 @@ class Reranker(BaseReranker):
 
             rerank_score = float(raw_score)
 
-            dense_score = getattr(hit, "score", 0.0)
+            rerank_score = max(
+                0.0,
+                min(1.0, rerank_score)
+            )
+
+            dense_score = float(
+                getattr(hit, "score", 0.0)
+            )
+
+            dense_score = max(
+                0.0,
+                min(1.0, dense_score)
+            )
+
+            lexical_score = self._lexical_overlap(
+                query=query,
+                text=hit.text or ""
+            )
+
+            payload = hit.payload or {}
+
+            header_boost = self._header_boost(
+                query=query,
+                header=payload.get("header", "")
+            )
 
             final_score = (
                 self.rerank_weight * rerank_score +
-                self.dense_weight * dense_score
+                self.dense_weight * dense_score +
+                self.lexical_weight * lexical_score +
+                header_boost
             )
 
             reranked.append(
@@ -151,22 +193,37 @@ class Reranker(BaseReranker):
 
         payload = doc.payload or {}
 
-        article = payload.get("article_number", "")
-        header = payload.get("header", "")
+        article = payload.get(
+            "article_number",
+            ""
+        )
 
-        text = self._prepare_text(doc.text)
+        header = payload.get(
+            "header",
+            ""
+        )
+
+        text = self._prepare_text(
+            doc.text
+        )
 
         enriched_doc = f"""
-        Статья {article}
+Статья {article}
 
-        {header}
+{header}
 
-        {text}
-        """.strip()
+{text}
+""".strip()
 
-        return query.strip(), enriched_doc
+        return (
+            query.strip(),
+            enriched_doc
+        )
 
-    def _prepare_text(self, text: str) -> str:
+    def _prepare_text(
+        self,
+        text: str
+    ) -> str:
 
         text = (text or "").strip()
 
@@ -175,6 +232,72 @@ class Reranker(BaseReranker):
 
         return text[:1200]
 
+    def _lexical_overlap(
+        self,
+        query: str,
+        text: str
+    ) -> float:
+
+        query_words = set(
+            re.findall(
+                r"\w+",
+                query.lower()
+            )
+        )
+
+        text_words = set(
+            re.findall(
+                r"\w+",
+                text.lower()
+            )
+        )
+
+        if not query_words:
+            return 0.0
+
+        overlap = (
+            query_words & text_words
+        )
+
+        return (
+            len(overlap) /
+            len(query_words)
+        )
+
+    def _header_boost(
+        self,
+        query: str,
+        header: str
+    ) -> float:
+
+        query = query.lower().strip()
+
+        header = (
+            header or ""
+        ).lower().strip()
+
+        if not header:
+            return 0.0
+
+        if query in header:
+            return 0.15
+
+        query_words = query.split()
+
+        matched = sum(
+            1
+            for w in query_words
+            if w in header
+        )
+
+        if matched >= 2:
+            return 0.10
+
+        if matched >= 1:
+            return 0.05
+
+        return 0.0
+
     def _diversify(
         self,
         hits: List[SearchResult],
@@ -182,6 +305,7 @@ class Reranker(BaseReranker):
     ) -> List[SearchResult]:
 
         selected = []
+
         seen = set()
 
         for h in hits:
@@ -189,8 +313,12 @@ class Reranker(BaseReranker):
             payload = h.payload or {}
 
             key = (
-                payload.get("article_number"),
-                payload.get("header")
+                payload.get(
+                    "article_number"
+                ),
+                payload.get(
+                    "header"
+                )
             )
 
             if key in seen:
@@ -213,8 +341,11 @@ class Reranker(BaseReranker):
     ):
 
         print("\n" + "=" * 100)
+
         print("[RERANK DEBUG]")
+
         print(f"QUERY: {query}")
+
         print("=" * 100)
 
         if not hits:
@@ -251,15 +382,44 @@ class Reranker(BaseReranker):
 
         scored = []
 
-        for hit, raw_score in zip(valid_hits, raw_scores):
+        for hit, raw_score in zip(
+            valid_hits,
+            raw_scores
+        ):
 
             rerank_score = float(raw_score)
 
-            dense_score = getattr(hit, "score", 0.0)
+            rerank_score = max(
+                0.0,
+                min(1.0, rerank_score)
+            )
+
+            dense_score = float(
+                getattr(hit, "score", 0.0)
+            )
+
+            dense_score = max(
+                0.0,
+                min(1.0, dense_score)
+            )
+
+            lexical_score = self._lexical_overlap(
+                query=query,
+                text=hit.text or ""
+            )
+
+            payload = hit.payload or {}
+
+            header_boost = self._header_boost(
+                query=query,
+                header=payload.get("header", "")
+            )
 
             final_score = (
                 self.rerank_weight * rerank_score +
-                self.dense_weight * dense_score
+                self.dense_weight * dense_score +
+                self.lexical_weight * lexical_score +
+                header_boost
             )
 
             scored.append(
@@ -267,12 +427,14 @@ class Reranker(BaseReranker):
                     hit,
                     rerank_score,
                     dense_score,
+                    lexical_score,
+                    header_boost,
                     final_score
                 )
             )
 
         scored.sort(
-            key=lambda x: x[3],
+            key=lambda x: x[5],
             reverse=True
         )
 
@@ -280,26 +442,66 @@ class Reranker(BaseReranker):
             hit,
             rerank_score,
             dense_score,
+            lexical_score,
+            header_boost,
             final_score
         ) in enumerate(scored[:top_n], start=1):
 
             payload = hit.payload or {}
 
-            article = payload.get("article_number", "unknown")
-            header = payload.get("header", "unknown")
+            article = payload.get(
+                "article_number",
+                "unknown"
+            )
+
+            header = payload.get(
+                "header",
+                "unknown"
+            )
 
             print(f"\n[{idx}]")
 
-            print(f"RERANK SCORE : {rerank_score:.4f}")
-            print(f"DENSE SCORE  : {dense_score:.4f}")
-            print(f"FINAL SCORE  : {final_score:.4f}")
+            print(
+                f"RERANK SCORE : "
+                f"{rerank_score:.4f}"
+            )
 
-            print(f"ARTICLE      : {article}")
-            print(f"HEADER       : {header}")
+            print(
+                f"DENSE SCORE  : "
+                f"{dense_score:.4f}"
+            )
+
+            print(
+                f"LEXICAL      : "
+                f"{lexical_score:.4f}"
+            )
+
+            print(
+                f"HEADER BOOST : "
+                f"{header_boost:.4f}"
+            )
+
+            print(
+                f"FINAL SCORE  : "
+                f"{final_score:.4f}"
+            )
+
+            print(
+                f"ARTICLE      : "
+                f"{article}"
+            )
+
+            print(
+                f"HEADER       : "
+                f"{header}"
+            )
 
             print("\nTEXT:")
+
             print("-" * 80)
 
-            print((hit.text or "")[:1000])
+            print(
+                (hit.text or "")[:1000]
+            )
 
             print("-" * 80)
