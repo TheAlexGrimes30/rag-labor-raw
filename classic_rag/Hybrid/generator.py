@@ -1,11 +1,10 @@
 import re
-
 from abc import ABC, abstractmethod
 from typing import List
 
 from llama_cpp import Llama
-
 from classic_rag.Hybrid.search_result import SearchResult
+
 
 
 class BaseLLMClient(ABC):
@@ -32,25 +31,17 @@ class BaseContextCleaner(ABC):
 class BaseGenerator(ABC):
 
     @abstractmethod
-    def generate(
-            self,
-            query: str,
-            context: str,
-            hits: List[SearchResult]
-    ) -> str:
+    def generate(self, query: str, context: str, hits: List[SearchResult]) -> str:
         raise NotImplementedError
 
 
 class ContextCleaner(BaseContextCleaner):
 
     def clean_context(self, text: str) -> str:
-
         text = re.sub(r"#+", "", text)
-
         text = re.sub(r"\*+", "", text)
-
         text = re.sub(r"\n{3,}", "\n\n", text)
-
+        text = re.sub(r"[ \t]+", " ", text)
         return text.strip()
 
 
@@ -62,39 +53,41 @@ class QwenClient(BaseLLMClient):
             model_path=str(model_path),
             n_ctx=4096,
             n_threads=8,
-            temperature=0.1,
-            top_p=0.7,
-            repeat_penalty=1.2
+            verbose=False
         )
 
     def generate(self, prompt: str) -> str:
 
-        output = self.llm(
-            prompt,
-            max_tokens=180,
+        output = self.llm.create_chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты юридический ассистент по ТК РФ. "
+                        "Отвечай строго по контексту. "
+                        "НЕ ПИШИ рассуждения, шаги или объяснения. "
+                        "Возвращай только финальный ответ."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            max_tokens=320,
+            temperature=0.1,
+            top_p=0.85,
+            repeat_penalty=1.15,
             stop=[
-                "КОНТЕКСТ:",
-                "Контекст:",
-                "Запрос:",
-                "ВОПРОС:",
-                "\n[Источник",
-                "\nСтатья:"
+                "\nОбоснование",
+                "\nАнализ",
+                "\nПояснение",
+                "\nReasoning",
+                "\nExplanation"
             ]
         )
 
-        text = output["choices"][0]["text"]
-
-        return text.strip()
-
-    def close(self):
-
-        if self.llm is not None:
-            try:
-                del self.llm
-            except Exception:
-                pass
-
-            self.llm = None
+        return output["choices"][0]["message"]["content"].strip()
 
 
 class LaborPromptBuilder(BasePromptBuilder):
@@ -102,265 +95,147 @@ class LaborPromptBuilder(BasePromptBuilder):
     def build(self, query: str, context: str) -> str:
 
         return f"""
-        Ты — юридический ассистент по трудовому праву РФ.
+        Ты юридическая система по Трудовому кодексу РФ.
         
-        Используй ТОЛЬКО информацию из контекста.
+        =====================
+        ПРАВИЛА
+        =====================
         
-        ЗАПРЕЩЕНО:
-        - придумывать информацию
-        - объяснять свои действия
-        - писать рассуждения
-        - писать "Обоснование"
-        - писать "Вывод"
-        - повторять вопрос
-        - повторять контекст
-        - упоминать prompt
-        - использовать фразы:
-          "в контексте"
-          "в предоставленных источниках"
-          "недостаточно информации"
-          "проверьте"
-          "внимательно"
-        - писать статьи, которых нет в контексте
+        - Отвечай строго по контексту
+        - НЕ добавляй рассуждения
+        - НЕ объясняй процесс
+        - НЕ используй слова: "анализ", "обоснование", "пояснение"
+        - Дай ТОЛЬКО финальный ответ
+        - Если есть список — используй список
         
-        ПРАВИЛА ОТВЕТА:
-        - ответ должен быть кратким
-        - ответ должен быть юридически точным
-        - если есть перечисление — используй список
-        - если перечисления нет — используй обычный текст
-        - не дублируй информацию
-        - обязательно укажи норму права
+        ВАЖНО:
+        НЕ ПИШИ НИЧЕГО КРОМЕ ОТВЕТА
         
-        ЕСЛИ ОТВЕТА НЕТ:
-        Недостаточно данных.
+        =====================
+        КОНТЕКСТ
+        =====================
         
-        КОНТЕКСТ:
         {context}
         
-        ВОПРОС:
+        =====================
+        ВОПРОС
+        =====================
+        
         {query}
         
-        ОТВЕТ:
+        =====================
+        ОТВЕТ
+        =====================
         """.strip()
 
 
-class Generator(BaseGenerator):
+class Generator:
 
-    def __init__(
-            self,
-            llm: BaseLLMClient,
-            prompt_builder: BasePromptBuilder,
-            cleaner: BaseContextCleaner
-    ):
-
+    def __init__(self, llm, prompt_builder, cleaner):
         self.llm = llm
-
         self.prompt_builder = prompt_builder
-
         self.cleaner = cleaner
 
-    def generate(
-            self,
-            query: str,
-            context: str,
-            hits: List[SearchResult]
-    ) -> str:
 
-        context = self.cleaner.clean_context(context)
+    def generate(self, query: str, context: str, hits: List[SearchResult]) -> str:
 
-        if not context:
+        context = self.cleaner.clean_context(context or "")
+
+        if len(context) < 80:
+            context = self._build_fallback_context(hits)
+
+        if len(context) < 30:
             return "Недостаточно данных."
 
-        prompt = self.prompt_builder.build(
-            query=query,
-            context=context
-        )
+        prompt = self.prompt_builder.build(query, context)
 
-        raw = self.llm.generate(prompt)
+        try:
+            raw = self.llm.generate(prompt)
+        except Exception:
+            return "Ошибка генерации ответа."
 
-        cleaned = self._postprocess(raw)
+        return self._postprocess(raw)
 
-        sources = self._build_sources(hits)
 
-        return f"{cleaned}\n\nИсточник:\n{sources}"
+    def _build_fallback_context(self, hits: List[SearchResult]) -> str:
+
+        parts = []
+
+        for h in hits[:5]:
+
+            text = (h.text or "").strip()
+            article = h.payload.get("article_number", "?")
+            header = h.payload.get("header", "")
+
+            if len(text) < 20:
+                continue
+
+            parts.append(
+                f"Статья {article} — {header}\n{text[:700]}"
+            )
+
+        return "\n\n".join(parts)
+
 
     def _postprocess(self, text: str) -> str:
 
-        text = re.sub(r"<.*?>", "", text)
+        if not text:
+            return "Недостаточно данных."
 
-        text = re.sub(r"\*+", "", text)
+        text = re.sub(r"<.*?>", "", text).strip()
 
-        text = re.sub(r"\n{3,}", "\n\n", text)
-
-        garbage_patterns = [
-            r"(?i)обоснование:.*",
-            r"(?i)вывод:.*",
-            r"(?i)в контексте.*",
-            r"(?i)в предоставленных источниках.*",
-            r"(?i)проверьте.*",
-            r"(?i)внимательно.*",
-            r"(?i)ты —.*",
-            r"(?i)запрещено:.*",
-            r"(?i)правила ответа:.*",
-            r"(?i)контекст:.*",
-            r"(?i)вопрос:.*",
-            r"(?i)ответ:.*",
+        cut_markers = [
+            "обоснование",
+            "анализ",
+            "пояснение",
+            "комментарий",
+            "reasoning",
+            "explanation"
         ]
 
-        for pattern in garbage_patterns:
-            text = re.sub(
-                pattern,
-                "",
-                text,
-                flags=re.MULTILINE
-            )
+        lower = text.lower()
+        cut_pos = len(text)
 
-        text = self._remove_duplicate_lines(text)
+        for m in cut_markers:
+            idx = lower.find(m)
+            if idx != -1:
+                cut_pos = min(cut_pos, idx)
 
-        text = self._remove_duplicate_sentences(text)
+        text = text[:cut_pos].strip()
 
-        text = self._normalize_lists(text)
+        lines = []
+        bullet_count = 0
 
-        text = text.strip()
+        for line in text.splitlines():
+            l = line.strip()
+            if not l:
+                continue
 
-        if not text:
-            text = "Недостаточно данных."
+            if re.match(r"^[-•*]\s+", l):
+                l = re.sub(r"^[-•*]\s+", "- ", l)
+                bullet_count += 1
+
+            lines.append(l)
+
+        text = "\n".join(lines).strip()
+
+        if len(text.split()) < 4:
+            return "Недостаточно данных."
 
         return text
 
-    def _remove_duplicate_lines(
-            self,
-            text: str
-    ) -> str:
+    def close(self):
+        print("Shutting down RAG...")
 
-        seen = set()
+        try:
+            if hasattr(self.llm, "llm"):
+                self.llm = None
 
-        result = []
+        except Exception as e:
+            print("[WARN] LLM cleanup error:", repr(e))
 
-        for line in text.splitlines():
-
-            normalized = re.sub(
-                r"\s+",
-                " ",
-                line.strip().lower()
-            )
-
-            if not normalized:
-                continue
-
-            if normalized in seen:
-                continue
-
-            seen.add(normalized)
-
-            result.append(line.strip())
-
-        return "\n".join(result)
-
-    def _remove_duplicate_sentences(
-            self,
-            text: str
-    ) -> str:
-
-        sentences = re.split(
-            r'(?<=[.!?])\s+',
-            text
-        )
-
-        seen = set()
-
-        result = []
-
-        for sentence in sentences:
-
-            normalized = re.sub(
-                r"\s+",
-                " ",
-                sentence.lower()
-            ).strip()
-
-            if len(normalized) < 8:
-                continue
-
-            if normalized in seen:
-                continue
-
-            seen.add(normalized)
-
-            result.append(sentence.strip())
-
-        return " ".join(result)
-
-    def _normalize_lists(
-            self,
-            text: str
-    ) -> str:
-
-        lines = []
-
-        for line in text.splitlines():
-
-            line = line.strip()
-
-            if not line:
-                continue
-
-            if line.startswith("-"):
-
-                line = re.sub(
-                    r"^-+\s*",
-                    "- ",
-                    line
-                )
-
-            lines.append(line)
-
-        bullet_count = sum(
-            1 for x in lines
-            if x.startswith("- ")
-        )
-
-        if bullet_count <= 1:
-
-            text = " ".join(
-                line.replace("- ", "")
-                for line in lines
-            )
-
-            return text.strip()
-
-        return "\n".join(lines)
-
-    def _build_sources(
-            self,
-            hits: List[SearchResult]
-    ) -> str:
-
-        seen = set()
-
-        sources = []
-
-        for h in hits:
-
-            article = h.payload.get(
-                "article_number"
-            )
-
-            if not article:
-                continue
-
-            source = (
-                f"- Трудовой кодекс РФ, статья {article}"
-            )
-
-            if source in seen:
-                continue
-
-            seen.add(source)
-
-            sources.append(source)
-
-        if not sources:
-            return "-"
-
-        return "\n".join(sources)
+        try:
+            if hasattr(self, "client"):
+                self.client.close()
+        except Exception as e:
+            print("[WARN] Qdrant close error:", repr(e))
