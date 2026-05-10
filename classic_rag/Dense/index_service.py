@@ -1,8 +1,8 @@
 from typing import List
 
-from classic_rag.Hybrid.rag_config import Chunk
-from classic_rag.Hybrid.retriever import Embedder
-from classic_rag.Hybrid.storage import VectorStore
+from classic_rag.Dense.rag_config import Chunk
+from classic_rag.Dense.retriever import Embedder
+from classic_rag.Dense.storage import VectorStore
 
 
 class IndexService:

@@ -9,7 +9,7 @@ import re
 
 from sentence_transformers import CrossEncoder
 
-from classic_rag.Hybrid.search_result import SearchResult
+from classic_rag.Dense.search_result import SearchResult
 
 
 class BaseReranker(ABC):

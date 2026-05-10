@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 from typing import List
 
 from llama_cpp import Llama
-from classic_rag.Hybrid.search_result import SearchResult
+from classic_rag.Dense.search_result import SearchResult
 
 class BaseLLMClient(ABC):
 

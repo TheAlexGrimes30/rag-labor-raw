@@ -1,327 +1,194 @@
-import os
-import re
-import yaml
-from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Dict
+from typing import List
 
-from langchain_core.documents import Document
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from llama_cpp import Llama
-from sentence_transformers import CrossEncoder
+from qdrant_client import QdrantClient
 
-@dataclass
-class RAGResponse:
-    answer: str
-    sources: List[Dict]
-
-class BaseRetriever(ABC):
-    @abstractmethod
-    def retrieve(self, query: str, k: int = 3) -> List[Document]:
-        pass
-
-
-class DenseRetriever(BaseRetriever):
-    def __init__(self, documents: List[Document]):
-        print("Initializing DenseRetriever...")
-
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="intfloat/multilingual-e5-base"
-        )
-
-        if os.path.exists("faiss_index"):
-            print("Loading FAISS index...")
-            self.db = FAISS.load_local(
-                "faiss_index",
-                self.embeddings,
-                allow_dangerous_deserialization=True
-            )
-        else:
-            print("Building FAISS index...")
-            for doc in documents:
-                doc.page_content = "passage: " + doc.page_content
-
-            self.db = FAISS.from_documents(documents, self.embeddings)
-            self.db.save_local("faiss_index")
-
-    def retrieve(self, query: str, k: int = 3) -> List[Document]:
-        query = "query: " + query
-
-        docs = self.db.max_marginal_relevance_search(
-            query,
-            k=k,
-            fetch_k=10
-        )
-
-        unique = {}
-        for d in docs:
-            key = d.metadata.get("article_id", d.metadata["source"])
-            if key not in unique:
-                unique[key] = d
-
-        return list(unique.values())[:k]
-
-class Reranker:
-    def __init__(self):
-        print("Loading Cross-Encoder...")
-        self.model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-
-    def rerank(self, query: str, docs: List[Document], top_k: int = 3) -> List[Document]:
-        if not docs:
-            return []
-
-        pairs = [[query, d.page_content] for d in docs]
-        scores = self.model.predict(pairs)
-
-        scored_docs = sorted(zip(docs, scores), key=lambda x: x[1], reverse=True)
-        return [d for d, _ in scored_docs][:top_k]
-
-
-class QueryClassifier:
-    def classify(self, query: str) -> str:
-        q = query.lower()
-
-        if any(w in q for w in ["что делать", "как поступить", "не платят", "уволили"]):
-            return "recommendation"
-
-        if any(w in q for w in ["что такое", "объясни", "что регулирует"]):
-            return "law_info"
-
-        return "qa"
-
-class Generator:
-    def __init__(self):
-        print("Loading LLM...")
-
-        base_dir = Path(__file__).resolve().parent.parent
-        model_path = base_dir / "models" / "Phi-3-mini-4k-instruct-q4.gguf"
-
-        self.llm = Llama(
-            model_path=str(model_path),
-            n_ctx=4096,
-            n_threads=8,
-            n_gpu_layers=0
-        )
-
-    def clean_context(self, context: str) -> str:
-        context = re.sub(r"---.*?---", "", context, flags=re.DOTALL)
-
-        context = re.sub(r"#", "", context)
-
-        context = re.sub(r"\n{2,}", "\n", context)
-
-        return context.strip()
-
-    def extract_article(self, context: str) -> str:
-        match = re.search(r"Статья\s+(\d+)", context)
-        return match.group(1) if match else "?"
-
-    def build_prompt(self, query: str, context: str, query_type: str) -> str:
-        context = self.clean_context(context)
-
-        base_rules = """
-        Ты юридический ассистент по ТК РФ.
-        
-        Правила:
-        1. Используй ТОЛЬКО контекст
-        2. НЕ придумывай
-        3. Отвечай кратко
-        4. Укажи статью
-        """
-
-        if query_type == "qa":
-            return f"""
-            {base_rules}
-            
-            Формат:
-            Да/Нет
-            Статья: ...
-            Ответ: ...
-            
-            Контекст:
-            {context}
-            
-            Вопрос: {query}
-            Ответ:
-            """
-
-        elif query_type == "law_info":
-            return f"""
-            {base_rules}
-            
-            Формат:
-            Статья: ...
-            Описание: ...
-            
-            Контекст:
-            {context}
-            
-            Вопрос: {query}
-            Ответ:
-            """
-
-        elif query_type == "recommendation":
-            return f"""
-            {base_rules}
-            
-            Формат:
-            1. ...
-            2. ...
-            Статья: ...
-            
-            Контекст:
-            {context}
-            
-            Ситуация: {query}
-            Ответ:
-            """
-
-    def generate(self, query, context, query_type):
-        if not context.strip():
-            return "Недостаточно информации"
-
-        prompt = self.build_prompt(query, context, query_type)
-
-        result = self.llm(
-            prompt,
-            max_tokens=200,
-            temperature=0.1,
-            stop=["Контекст:", "Вопрос:"]
-        )
-
-        return result["choices"][0]["text"].strip()
+from classic_rag.Dense.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
+from classic_rag.Dense.index_service import IndexService
+from classic_rag.Dense.ingestion import IngestionPipeline, MarkdownDocumentLoader, IngestionService
+from classic_rag.Dense.rag_chunkers import HybridLegalChunker
+from classic_rag.Dense.rag_config import RAGResponse, Chunk
+from classic_rag.Dense.rag_service import RAGService
+from classic_rag.Dense.reranker import Reranker
+from classic_rag.Dense.retriever import Retriever, Embedder
+from classic_rag.Dense.storage import VectorStore
 
 
 class ClassicRAG:
 
     def __init__(self):
-        print("Loading documents...")
-        self.documents = self.load_documents()
+        base_path = Path(__file__).resolve()
+        project_root = base_path.parents[2]
+        rag_db_path = project_root / "rag_db"
 
-        print("Chunking...")
-        self.chunks = self.chunk_documents(self.documents)
+        loader = MarkdownDocumentLoader(str(rag_db_path))
 
-        print("Retriever...")
-        self.retriever = DenseRetriever(self.chunks)
+        parser = HybridLegalChunker()
 
-        print("Reranker...")
-        self.reranker = Reranker()
-
-        print("Generator...")
-        self.generator = Generator()
-
-        print("Classifier...")
-        self.classifier = QueryClassifier()
-
-    def split_md(self, text: str):
-        match = re.match(r"^---\n(.*?)\n---\n(.*)", text, re.DOTALL)
-        if match:
-            metadata = yaml.safe_load(match.group(1))
-            content = match.group(2)
-        else:
-            metadata = {}
-            content = text
-        return metadata, content
-
-    def load_documents(self):
-        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-        data_path = os.path.join(BASE_DIR, "..", "rag_db")
-
-        docs = []
-
-        for root, _, files in os.walk(data_path):
-            for file in files:
-                if file.endswith(".md"):
-                    path = os.path.join(root, file)
-
-                    with open(path, "r", encoding="utf-8") as f:
-                        text = f.read()
-
-                    metadata, content = self.split_md(text)
-
-                    docs.append(Document(
-                        page_content=content,
-                        metadata={
-                            "source": path,
-                            "file_name": file,
-                            "article_id": metadata.get("id")
-                        }
-                    ))
-
-        print(f"Loaded: {len(docs)}")
-        return docs
-
-    def chunk_documents(self, docs):
-        chunks = []
-
-        for doc in docs:
-            text = doc.page_content
-
-            parts = re.split(r"\n---\n|###|##", text)
-
-            for part in parts:
-                if len(part.strip()) < 100:
-                    continue
-
-                chunks.append(Document(
-                    page_content=part.strip(),
-                    metadata=doc.metadata
-                ))
-
-        print(f"Chunks: {len(chunks)}")
-        return chunks
-
-    def process_query(self, query):
-        query = query.lower()
-        query = re.sub(r"\bст\.\b", "статья", query)
-        return query
-
-    def retrieve(self, query, query_type):
-        k = 5 if query_type == "recommendation" else 3
-
-        docs = self.retriever.retrieve(query, k=k)
-        docs = self.reranker.rerank(query, docs, top_k=k)
-
-        return docs
-
-    def build_context(self, docs):
-        return "\n\n---\n\n".join(d.page_content for d in docs)
-
-    def ask(self, query):
-        q_type = self.classifier.classify(query)
-        processed = self.process_query(query)
-
-        docs = self.retrieve(processed, q_type)
-        context = self.build_context(docs)
-
-        print("\n[DEBUG]")
-        print("Query:", query)
-        print("Docs:", [d.metadata["file_name"] for d in docs])
-
-        answer = self.generator.generate(query, context, q_type)
-
-        return RAGResponse(
-            answer=answer,
-            sources=[d.metadata for d in docs]
+        pipeline = IngestionPipeline(
+            loader=loader,
+            chunker=parser
         )
 
-TEST_QUERIES = [
-    "какие цели трудового законодательства",
-    "что такое свобода труда",
-    "что считается дискриминацией"
-]
+        self.ingestion = IngestionService(pipeline)
+
+        embedder = Embedder(
+            model_name="Qwen/Qwen3-Embedding-0.6B"
+        )
+
+        client = QdrantClient(host="localhost", port=6333)
+
+        vector_store = VectorStore(
+            client=client,
+            collection_name="labor_rag_dense_collection",
+            vector_size=embedder.dim
+        )
+
+        vector_store.ensure_collection()
+
+        self.index_service = IndexService(vector_store, embedder)
+
+        retriever = Retriever(
+            vector_store=vector_store,
+            embedder=embedder
+        )
 
 
-def run_tests(rag):
-    for q in TEST_QUERIES:
-        print("\n====================")
-        print("Q:", q)
-        result = rag.ask(q)
-        print("A:", result.answer)
+        model_path = project_root / "models" / "Qwen3-8B-Q4_K_M.gguf"
 
+        llm = QwenClient(str(model_path))
+
+        generator = Generator(
+            llm=llm,
+            prompt_builder=LaborPromptBuilder(),
+            cleaner=ContextCleaner()
+        )
+
+        reranker = Reranker()
+        self.rag_service = RAGService(retriever, reranker, generator)
+        self.client = client
+        self.generator = generator
+
+        print("Running ingestion...")
+        self.chunks = self.ingestion.load_chunks()
+
+        print(f"\n[DEBUG] Total chunks: {len(self.chunks)}")
+
+        for c in self.chunks[:20]:
+            print(c.metadata.article_number, "|", c.metadata.header)
+
+        for i, c in enumerate(self.chunks[:5]):
+            payload = c.to_payload()
+
+            print(f"\n--- CHUNK {i} ---")
+            print(f"text: {c.text[:200]}")
+            print(f"file: {payload.get('file')}")
+            print(f"article: {payload.get('article_number')}")
+            print(f"header: {payload.get('header')}")
+
+        print("Indexing...")
+        self.index_service.index(self.chunks)
+
+
+    def ask(self, query: str) -> RAGResponse:
+        return self.rag_service.ask(query)
+
+    def close(self):
+        print("Shutting down RAG...")
+
+        try:
+            if hasattr(self.generator, "llm"):
+                self.generator.llm = None
+
+        except Exception as e:
+            print("[WARN] LLM cleanup error:", repr(e))
+
+        try:
+            self.client.close()
+        except Exception as e:
+            print("[WARN] Qdrant close error:", repr(e))
+
+def debug_chunks(chunks: List[Chunk]):
+    print("\n[DEBUG] ===== CHUNK QUALITY =====")
+
+    total = len(chunks)
+    short = 0
+    duplicates = 0
+
+    seen = set()
+
+    for c in chunks:
+        text = (c.text or "").strip()
+
+        if len(text) < 50:
+            short += 1
+
+        key = text[:200]
+        if key in seen:
+            duplicates += 1
+        else:
+            seen.add(key)
+
+    print(f"Total chunks: {total}")
+    print(f"Short chunks (<50 chars): {short}")
+    print(f"Duplicates: {duplicates}")
+    print(f"Unique chunks: {total - duplicates}")
+
+def save_chunks_to_txt(chunks, path="debug_chunks.txt"):
+    with open(path, "w", encoding="utf-8") as f:
+
+        for i, c in enumerate(chunks):
+
+            payload = c.to_payload()
+
+            f.write(f"\n--- CHUNK {i} ---\n")
+            f.write(f"text:\n{c.text}\n\n")
+            f.write(f"file: {payload.get('file')}\n")
+            f.write(f"article: {payload.get('article_number')}\n")
+            f.write(f"header: {payload.get('header')}\n")
+            f.write(f"level: {payload.get('level')}\n")
+            f.write(f"topics: {payload.get('topics')}\n")
+            f.write("-" * 60 + "\n")
 
 if __name__ == "__main__":
+
     rag = ClassicRAG()
-    run_tests(rag)
+    retriever = rag.rag_service.retriever
+    reranker = rag.rag_service.reranker
+    chunks = rag.chunks
+
+    try:
+        questions = [
+            "какие цели трудового законодательства"
+        ]
+
+        for q in questions:
+            print("\nQ:", q)
+
+            try:
+                retriever.debug_query(q, top_k=10)
+
+                hits = retriever.retrieve(q, top_k=25)
+
+                reranker.debug_rerank(q, hits)
+
+                res = rag.ask(q)
+
+                print("A:", res.answer)
+
+            except Exception as e:
+                print("\n[ERROR] Ошибка при обработке вопроса:")
+                print("Question:", q)
+                print("Error:", repr(e))
+
+                continue
+
+    except Exception as e:
+        print("\n[CRITICAL ERROR] Сбой всей RAG системы:")
+        print(repr(e))
+
+    finally:
+        try:
+            rag.close()
+        except Exception as e:
+            print("\n[WARN] Ошибка при закрытии ресурсов:", repr(e))

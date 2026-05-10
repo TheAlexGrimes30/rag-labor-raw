@@ -3,7 +3,7 @@ import hashlib
 from typing import List, Dict
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from classic_rag.Hybrid.rag_config import Chunk, ChunkMetadata
+from classic_rag.Dense.rag_config import Chunk, ChunkMetadata
 
 
 class Sectioner:
