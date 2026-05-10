@@ -1,9 +1,9 @@
 from typing import List
 
 from classic_rag.Hybrid.rag_config import (
-    RAGResponse,
-    SearchResult
+    RAGResponse
 )
+from classic_rag.Hybrid.search_result import SearchResult
 
 
 class RAGService:
