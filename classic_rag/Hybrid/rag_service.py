@@ -22,6 +22,7 @@ class RAGService:
         self.max_context_chars = max_context_chars
         self.min_final_score = min_final_score
 
+
     def ask(self, query: str) -> RAGResponse:
 
         hits = self.retriever.retrieve(query=query, top_k=25)
@@ -30,14 +31,15 @@ class RAGService:
 
         filtered = self._filter_hits(reranked)
 
-        if len(filtered) == 0:
+        if not filtered:
             filtered = reranked[:5]
 
-        # 3. CONTEXT BUILD
         context = self._build_context(filtered)
 
-        if not context or len(context.strip()) < 30:
+        if len(context.strip()) < 30:
             context = self._fallback_context(reranked[:5])
+
+        context = self._sanitize_context(context)
 
         raw_answer = self.generator.generate(
             query=query,
@@ -49,10 +51,20 @@ class RAGService:
 
         sources = self._build_sources(filtered)
 
+        if sources:
+            answer = f"{answer}\n\nИсточник: {sources[0]}."
+
         return RAGResponse(
             answer=answer,
             sources=sources
         )
+
+
+    def _sanitize_context(self, text: str) -> str:
+        text = re.sub(r"(?i)\b(a:|q:)\b", "", text)
+        text = re.sub(r"\bНедостаточно данных\b.*", "", text, flags=re.IGNORECASE)
+        return text.strip()
+
 
     def _filter_hits(self, hits: List[SearchResult]) -> List[SearchResult]:
 
@@ -62,18 +74,14 @@ class RAGService:
         for h in hits:
 
             article = h.payload.get("article_number")
-            header = (h.payload.get("header") or "").lower()
-
             if not article:
                 continue
 
-            if self._is_noise_header(header):
-                continue
-
             score = getattr(h, "final_score", 0.0)
-
             if score < self.min_final_score:
                 continue
+
+            header = (h.payload.get("header") or "").lower()
 
             key = (article, header)
             if key in seen:
@@ -87,30 +95,6 @@ class RAGService:
 
         return filtered
 
-    def _is_noise_header(self, header: str) -> bool:
-
-        noise_patterns = [
-            "краткое содержание",
-            "практическое значение",
-            "общие выводы",
-            "комментарий",
-            "введение",
-            "систематизация"
-        ]
-
-        safe_headers = [
-            "основные",
-            "сфера действия",
-            "обязанности",
-            "понятие",
-            "цели",
-            "задачи"
-        ]
-
-        if any(s in header for s in safe_headers):
-            return False
-
-        return any(p in header for p in noise_patterns)
 
     def _build_context(self, hits: List[SearchResult]) -> str:
 
@@ -120,11 +104,9 @@ class RAGService:
 
         for h in hits:
 
-            article = h.payload.get("article_number", "?")
-            header = h.payload.get("header", "")
             text = (h.text or "").strip()
 
-            if len(text) < 20:
+            if len(text) < 30:
                 continue
 
             norm = self._normalize(text)
@@ -133,10 +115,14 @@ class RAGService:
 
             seen.add(norm)
 
-            block = f"""Статья {article} — {header}
+            article = h.payload.get("article_number", "?")
+            header = h.payload.get("header", "")
 
-{text[:900]}
-""".strip()
+            block = f"""
+            Статья {article} — {header}
+            
+            {text[:800]}
+            """.strip()
 
             if size + len(block) > self.max_context_chars:
                 break
@@ -146,24 +132,31 @@ class RAGService:
 
         return "\n\n".join(parts)
 
+
     def _fallback_context(self, hits: List[SearchResult]) -> str:
 
         parts = []
 
         for h in hits:
 
-            article = h.payload.get("article_number", "?")
-            header = h.payload.get("header", "")
             text = (h.text or "").strip()
 
+            if len(text) < 50:
+                continue
+
+            article = h.payload.get("article_number", "?")
+            header = h.payload.get("header", "")
+
             parts.append(
-                f"Статья {article} — {header}\n\n{text[:700]}"
+                f"Статья {article} — {header}\n{text[:500]}"
             )
 
         return "\n\n".join(parts)
 
+
     def _normalize(self, text: str) -> str:
         return re.sub(r"\s+", " ", text.lower()).strip()
+
 
     def _validate_and_fix(self, text: str) -> str:
 
@@ -172,34 +165,29 @@ class RAGService:
 
         text = text.strip()
 
-        bad_tokens = [
-            "A:", "Q:",
-            "reasoning", "explanation",
-            "обоснование", "анализ"
+        text = re.sub(r"(?i)^(a:|q:)\s*", "", text)
+
+        bad_patterns = [
+            r"(?is)^(okay|let's|first|i need|the user).*?$",
+            r"(?is)^(нужно ответить|сначала|важно|убеждаюсь).*?$",
+            r"(?is)reasoning|analysis|explanation"
         ]
 
-        lower = text.lower()
+        for p in bad_patterns:
+            text = re.sub(p, "", text)
 
-        cut_pos = len(text)
-        for token in bad_tokens:
-            idx = lower.find(token)
-            if idx != -1:
-                cut_pos = min(cut_pos, idx)
+        text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        text = text[:cut_pos].strip()
+        bullets = re.findall(r"(?:^|\n)-\s+(.*)", text)
 
-        lines = []
-        for line in text.splitlines():
-            l = line.strip()
-            if not l:
-                continue
-            if any(x in l.lower() for x in bad_tokens):
-                continue
-            lines.append(l)
+        if bullets:
+            return "Трудовое законодательство устанавливает " + \
+                   ", ".join(b.strip(" .") for b in bullets) + \
+                   " в соответствии с Трудовым кодексом РФ."
 
-        text = "\n".join(lines).strip()
+        text = re.sub(r"\s+", " ", text).strip()
 
-        if len(text) < 5:
+        if len(text.split()) < 3:
             return "Недостаточно данных."
 
         return text
