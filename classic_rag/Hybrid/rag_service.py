@@ -1,6 +1,9 @@
 from typing import List
 
-from classic_rag.Hybrid.rag_config import RAGResponse, SearchResult
+from classic_rag.Hybrid.rag_config import (
+    RAGResponse,
+    SearchResult
+)
 
 
 class RAGService:
@@ -10,10 +13,13 @@ class RAGService:
             retriever,
             reranker,
             generator,
-            max_context_chars: int = 12000
+            max_context_chars: int = 7000
     ):
+
         self.retriever = retriever
+
         self.reranker = reranker
+
         self.generator = generator
 
         self.max_context_chars = max_context_chars
@@ -21,21 +27,24 @@ class RAGService:
     def ask(self, query: str) -> RAGResponse:
 
         hits = self.retriever.retrieve(
-            query,
-            top_k=25
+            query=query,
+            top_k=20
         )
 
         reranked = self.reranker.rerank(
             query=query,
             hits=hits,
-            top_n=8
+            top_n=4
         )
 
-        context = self._build_context(reranked)
+        context = self._build_context(
+            reranked
+        )
 
         answer = self.generator.generate(
             query=query,
-            context=context
+            context=context,
+            hits=reranked
         )
 
         sources = self._build_sources(
@@ -56,7 +65,9 @@ class RAGService:
 
         current_size = 0
 
-        for i, h in enumerate(hits, start=1):
+        seen = set()
+
+        for h in hits:
 
             article = h.payload.get(
                 "article_number",
@@ -68,34 +79,42 @@ class RAGService:
                 ""
             )
 
-            score = round(
-                float(h.score),
-                4
-            )
-
             text = (h.text or "").strip()
 
-            if len(text) < 30:
+            if len(text) < 40:
                 continue
 
+            key = (
+                str(article),
+                header.lower()
+            )
+
+            if key in seen:
+                continue
+
+            seen.add(key)
+
+            text = text[:1200]
+
             block = f"""
-            [Источник #{i}]
-            [Релевантность: {score}]
-
-            Статья: {article}
+            Трудовой кодекс РФ
+            Статья {article}
             Раздел: {header}
-
+            
             {text}
             """.strip()
 
-            if current_size + len(block) > self.max_context_chars:
+            if (
+                    current_size + len(block)
+                    > self.max_context_chars
+            ):
                 break
 
             parts.append(block)
 
             current_size += len(block)
 
-        return "\n\n-------------------\n\n".join(parts)
+        return "\n\n".join(parts)
 
     def _build_sources(
             self,
@@ -103,6 +122,7 @@ class RAGService:
     ) -> List[str]:
 
         seen = set()
+
         sources = []
 
         for h in hits:
@@ -111,23 +131,18 @@ class RAGService:
                 "article_number"
             )
 
-            header = h.payload.get(
-                "header",
-                ""
-            )
-
             if not article:
                 continue
 
-            key = (article, header)
+            source = (
+                f"Трудовой кодекс РФ, статья {article}"
+            )
 
-            if key in seen:
+            if source in seen:
                 continue
 
-            seen.add(key)
+            seen.add(source)
 
-            sources.append(
-                f"Статья {article} — {header}"
-            )
+            sources.append(source)
 
         return sources
