@@ -81,4 +81,3 @@ class GraphRerankMapper:
             node_id=base.node_id,
             edges=base.edges
         )
-    
