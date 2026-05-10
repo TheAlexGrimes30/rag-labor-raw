@@ -25,6 +25,10 @@ class Chunk:
     metadata: ChunkMetadata
     chunk_id: str | None = None
 
+    @property
+    def id(self) -> str | None:
+        return self.chunk_id
+
     def __post_init__(self) -> None:
         if not self.text:
             return
