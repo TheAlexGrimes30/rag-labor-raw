@@ -1,5 +1,5 @@
 import re
-from abc import abstractmethod, ABC
+from abc import ABC, abstractmethod
 from typing import List
 
 from llama_cpp import Llama
@@ -32,10 +32,10 @@ class BaseGenerator(ABC):
 
     @abstractmethod
     def generate(
-            self,
-            query: str,
-            context: str,
-            hits: List[SearchResult]
+        self,
+        query: str,
+        context: str,
+        hits: List[SearchResult]
     ) -> str:
         raise NotImplementedError
 
@@ -43,10 +43,20 @@ class BaseGenerator(ABC):
 class ContextCleaner(BaseContextCleaner):
 
     def clean_context(self, text: str) -> str:
+
+        if not text:
+            return ""
+
         text = re.sub(r"#+", "", text)
         text = re.sub(r"\*+", "", text)
+
         text = re.sub(r"\n{3,}", "\n\n", text)
+
         text = re.sub(r"[ \t]+", " ", text)
+
+        text = re.sub(r"[ ]{2,}", " ", text)
+
+        text = re.sub(r"---+", "", text)
 
         return text.strip()
 
@@ -54,6 +64,7 @@ class ContextCleaner(BaseContextCleaner):
 class QwenClient(BaseLLMClient):
 
     def __init__(self, model_path: str):
+
         self.llm = Llama(
             model_path=str(model_path),
             n_ctx=4096,
@@ -62,21 +73,26 @@ class QwenClient(BaseLLMClient):
         )
 
     def generate(self, prompt: str) -> str:
+
         output = self.llm.create_chat_completion(
+
             messages=[
                 {
                     "role": "system",
                     "content": (
                         "Ты юридический ассистент по Трудовому кодексу РФ.\n"
-                        "Отвечай строго одним абзацем.\n"
-                        "Запрещено:\n"
-                        "- списки\n"
+                        "Отвечай только финальным ответом.\n"
+                        "Нельзя писать:\n"
                         "- reasoning\n"
-                        "- объяснения\n"
-                        "- рассуждения\n"
-                        "- английские служебные фразы (A:, Okay, Let's)\n"
-                        "- любые шаги решения\n"
-                        "Верни только финальный юридический ответ."
+                        "- анализ\n"
+                        "- chain of thought\n"
+                        "- внутренний монолог\n"
+                        "- служебные фразы\n"
+                        "- 'Хорошо'\n"
+                        "- 'Проверю'\n"
+                        "- 'Сначала'\n"
+                        "- 'Пользователь спрашивает'\n"
+                        "Ответ должен быть кратким юридическим абзацем."
                     )
                 },
                 {
@@ -87,76 +103,77 @@ class QwenClient(BaseLLMClient):
 
             temperature=0.0,
             top_p=0.8,
-            repeat_penalty=1.1,
-            max_tokens=200,
+            repeat_penalty=1.15,
+            max_tokens=220,
 
             stop=[
+                "<think>",
+                "</think>",
+                "Reasoning:",
+                "Analysis:",
+                "Проверю",
+                "Хорошо",
+                "Сначала",
                 "A:",
                 "Answer:",
-                "Okay",
-                "Let's",
-                "Reasoning",
-                "Explanation",
-                "Обоснование",
-                "Анализ"
             ]
         )
 
         return output["choices"][0]["message"]["content"].strip()
 
     def close(self):
+
         self.llm = None
 
 
 class LaborPromptBuilder(BasePromptBuilder):
 
     def build(self, query: str, context: str) -> str:
+
         return f"""
         Ты юридическая система по Трудовому кодексу РФ.
-
+        
         =====================
-        ИНСТРУКЦИЯ
+        ПРАВИЛА
         =====================
-
+        
         Верни только готовый юридический ответ.
-
-        Строго запрещено:
-        - рассуждения
+        
+        Запрещено:
         - reasoning
-        - анализ
-        - пояснения
         - chain of thought
-        - описание процесса
+        - анализ
+        - объяснения
+        - комментарии
+        - внутренний монолог
         - служебные фразы
-
-        Не используй:
-        - "Нужно ответить"
-        - "Важно"
-        - "Сначала"
-        - "Убеждаюсь"
-
-        Формат ответа:
-        - один связный юридический текст
+        
+        Не начинай ответ со слов:
+        - Хорошо
+        - Проверю
+        - Сначала
+        - Пользователь спрашивает
+        - Ответ:
+        
+        Формат:
+        - один юридический абзац
+        - без markdown
         - без списка
-        - без вступления
         - без пояснений
-        - в конце обязательно укажи источник
-
-        Пример формата:
-        Трудовое законодательство устанавливает ... в соответствии с Трудовым кодексом РФ, статья 1.
-
+        - обязательно укажи статью ТК РФ
+        
         =====================
         КОНТЕКСТ
         =====================
-
+        
         {context}
-
+        
         =====================
         ВОПРОС
         =====================
-
+        
         {query}
-
+        
         =====================
         ФИНАЛЬНЫЙ ОТВЕТ
         =====================
@@ -165,80 +182,182 @@ class LaborPromptBuilder(BasePromptBuilder):
 
 class Generator(BaseGenerator):
 
-    def __init__(self, llm, prompt_builder, cleaner):
+    def __init__(
+        self,
+        llm,
+        prompt_builder,
+        cleaner
+    ):
+
         self.llm = llm
         self.prompt_builder = prompt_builder
         self.cleaner = cleaner
 
     def generate(
-            self,
-            query: str,
-            context: str,
-            hits: List[SearchResult]
+        self,
+        query: str,
+        context: str,
+        hits: List[SearchResult]
     ) -> str:
 
-        context = self.cleaner.clean_context(context or "")
+        context = self.cleaner.clean_context(
+            context or ""
+        )
 
         if len(context) < 80:
-            context = self._build_fallback_context(hits)
+            context = self._build_fallback_context(
+                hits
+            )
 
         if len(context) < 30:
             return "Недостаточно данных."
 
-        prompt = self.prompt_builder.build(query, context)
+        prompt = self.prompt_builder.build(
+            query,
+            context
+        )
 
         try:
             raw = self.llm.generate(prompt)
-        except Exception:
+
+        except Exception as e:
+            print("[LLM ERROR]", repr(e))
             return "Ошибка генерации ответа."
 
-        return self._postprocess(raw)
+        answer = self._postprocess(raw)
 
-    def _build_fallback_context(self, hits: List[SearchResult]) -> str:
+        if (
+            answer == "Недостаточно данных."
+            and hits
+        ):
+            answer = self._fallback_answer(hits)
+
+        return answer
+
+    def _build_fallback_context(
+        self,
+        hits: List[SearchResult]
+    ) -> str:
 
         parts = []
 
         for h in hits[:5]:
 
             text = (h.text or "").strip()
+
             if len(text) < 20:
                 continue
 
-            article = h.payload.get("article_number", "?")
-            header = h.payload.get("header", "")
+            payload = h.payload or {}
+
+            article = payload.get(
+                "article_number",
+                "?"
+            )
+
+            header = payload.get(
+                "header",
+                ""
+            )
 
             parts.append(
-                f"Статья {article} — {header}\n{text[:700]}"
+                f"Статья {article}. {header}\n{text[:1000]}"
             )
 
         return "\n\n".join(parts)
+
+    def _fallback_answer(
+        self,
+        hits: List[SearchResult]
+    ) -> str:
+
+        best = hits[0]
+
+        payload = best.payload or {}
+
+        article = payload.get(
+            "article_number",
+            "?"
+        )
+
+        text = (best.text or "").strip()
+
+        text = re.sub(r"\s+", " ", text)
+
+        return (
+            f"{text} "
+            f"Источник: Трудовой кодекс РФ, статья {article}."
+        )
 
     def _postprocess(self, text: str) -> str:
 
         if not text:
             return "Недостаточно данных."
 
-        text = re.sub(r"<.*?>", "", text)
-
-        text = re.sub(r"(?i)^(a|answer|ответ):\s*", "", text)
+        text = re.sub(
+            r"<.*?>",
+            "",
+            text,
+            flags=re.DOTALL
+        )
 
         text = re.sub(
-            r"(?i)(нужно ответить|сначала|важно|убеждаюсь|let'?s|okay|i need).*",
+            r"(?is)<think>.*?</think>",
             "",
             text
         )
 
-        text = re.sub(r"^\s*[-•*]\s+", "", text, flags=re.MULTILINE)
+        bad_patterns = [
 
-        text = re.sub(r"\s+", " ", text).strip()
+            r"(?i)^a:\s*",
+            r"(?i)^answer:\s*",
 
-        if len(text.split()) < 4:
+            r"(?i)^хорошо.*",
+            r"(?i)^проверю.*",
+            r"(?i)^сначала.*",
+            r"(?i)^важно.*",
+
+            r"(?i)^reasoning.*",
+            r"(?i)^analysis.*",
+
+            r"(?i)^пользователь спрашивает.*",
+
+            r"(?i)^ответ должен.*",
+        ]
+
+        for pattern in bad_patterns:
+
+            text = re.sub(
+                pattern,
+                "",
+                text,
+                flags=re.MULTILINE
+            )
+
+        text = re.sub(
+            r"\n\s*[-•*]\s*",
+            " ",
+            text
+        )
+
+        text = re.sub(
+            r"\s+",
+            " ",
+            text
+        ).strip()
+
+        if len(text.split()) < 5:
             return "Недостаточно данных."
 
-        return text
+        if "Источник:" not in text:
+            text += " Источник: Трудовой кодекс РФ."
+
+        return text.strip()
 
     def close(self):
+
         try:
             self.llm.close()
+
         except Exception:
             pass
