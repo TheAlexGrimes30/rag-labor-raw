@@ -1,8 +1,9 @@
 import re
 from abc import ABC, abstractmethod
+from typing import List
 
 from llama_cpp import Llama
-
+from classic_rag.Hybrid.search_result import SearchResult
 
 class BaseLLMClient(ABC):
 
@@ -28,140 +29,220 @@ class BaseContextCleaner(ABC):
 class BaseGenerator(ABC):
 
     @abstractmethod
-    def generate(self, query: str, context: str) -> str:
+    def generate(
+            self,
+            query: str,
+            context: str,
+            hits: List[SearchResult]
+    ) -> str:
         raise NotImplementedError
-
 
 class ContextCleaner(BaseContextCleaner):
 
     def clean_context(self, text: str) -> str:
+
         text = re.sub(r"#+", "", text)
+        text = re.sub(r"\*+", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+
         return text.strip()
 
 
 class QwenClient(BaseLLMClient):
 
     def __init__(self, model_path: str):
+
         self.llm = Llama(
             model_path=str(model_path),
             n_ctx=4096,
             n_threads=8,
-            top_p=0.8,
-            temperature=0.0,
-            repeat_penalty=1.15
+            verbose=False
         )
 
     def generate(self, prompt: str) -> str:
-        output = self.llm(
-            prompt,
+
+        output = self.llm.create_chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты юридический ассистент по Трудовому кодексу РФ.\n"
+                        "Отвечай строго одним абзацем.\n"
+                        "Запрещено:\n"
+                        "- списки\n"
+                        "- reasoning\n"
+                        "- объяснения\n"
+                        "- рассуждения\n"
+                        "- английские служебные фразы (A:, Okay, Let's)\n"
+                        "- любые шаги решения\n"
+                        "Верни только финальный юридический ответ."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+
+            temperature=0.0,
+            top_p=0.8,
+            repeat_penalty=1.1,
             max_tokens=200,
-            stop=["\n\n\n", "Контекст:", "Вопрос:"]
+
+            stop=[
+                "A:",
+                "Answer:",
+                "Okay",
+                "Let's",
+                "Reasoning",
+                "Explanation",
+                "Обоснование",
+                "Анализ"
+            ]
         )
 
-        answer = output["choices"][0]["text"].strip()
-
-        answer = re.sub(r"<.*?>", "", answer)
-        answer = re.sub(r"\n{3,}", "\n\n", answer)
-
-        return answer.strip()
+        return output["choices"][0]["message"]["content"].strip()
 
     def close(self):
-        if self.llm is not None:
-            try:
-                del self.llm
-            except Exception:
-                pass
-            self.llm = None
+        self.llm = None
 
 
 class LaborPromptBuilder(BasePromptBuilder):
 
     def build(self, query: str, context: str) -> str:
+
         return f"""
-        Ты — юридический ассистент по трудовому праву РФ.
-
-        ЗАДАЧА:
-        Ответь строго по контексту.
-
-        ЖЁСТКИЕ ПРАВИЛА:
-        - Используй ТОЛЬКО контекст
-        - Не добавляй объяснения
-        - Не добавляй примеры
-        - Не повторяй пункты
-        - Не пиши ничего вне формата
-
-        ЕСЛИ нет ответа:
-        Ответ:
-        Нет данных в контексте
-
-        ФОРМАТ:
-        Ответ:
-        - пункт
-
-        КОНТЕКСТ:
+        Ты юридическая система по Трудовому кодексу РФ.
+        
+        =====================
+        ИНСТРУКЦИЯ
+        =====================
+        
+        Верни только готовый юридический ответ.
+        
+        Строго запрещено:
+        - рассуждения
+        - reasoning
+        - анализ
+        - пояснения
+        - chain of thought
+        - описание процесса
+        - служебные фразы
+        
+        Не используй:
+        - "Нужно ответить"
+        - "Важно"
+        - "Сначала"
+        - "Убеждаюсь"
+        
+        Формат ответа:
+        - один связный юридический текст
+        - без списка
+        - без вступления
+        - без пояснений
+        - в конце обязательно укажи источник
+        
+        Пример формата:
+        Трудовое законодательство устанавливает ... в соответствии с Трудовым кодексом РФ, статья 1.
+        
+        =====================
+        КОНТЕКСТ
+        =====================
+        
         {context}
-
-        ВОПРОС:
+        
+        =====================
+        ВОПРОС
+        =====================
+        
         {query}
-
-        ОТВЕТ:
+        
+        =====================
+        ФИНАЛЬНЫЙ ОТВЕТ
+        =====================
         """.strip()
+
 
 
 class Generator(BaseGenerator):
 
-    def __init__(
-            self,
-            llm: BaseLLMClient,
-            prompt_builder: BasePromptBuilder,
-            cleaner: BaseContextCleaner
-    ):
+    def __init__(self, llm, prompt_builder, cleaner):
         self.llm = llm
         self.prompt_builder = prompt_builder
         self.cleaner = cleaner
 
-    def generate(self, query: str, context: str) -> str:
-        context = self.cleaner.clean_context(context)
+    def generate(
+            self,
+            query: str,
+            context: str,
+            hits: List[SearchResult]
+    ) -> str:
 
-        if not context:
-            return "Ответ:\nНет данных в контексте\n\nИсточник:\n-"
+        context = self.cleaner.clean_context(context or "")
+
+        if len(context) < 80:
+            context = self._build_fallback_context(hits)
+
+        if len(context) < 30:
+            return "Недостаточно данных."
 
         prompt = self.prompt_builder.build(query, context)
-        raw = self.llm.generate(prompt)
+
+        try:
+            raw = self.llm.generate(prompt)
+        except Exception:
+            return "Ошибка генерации ответа."
 
         return self._postprocess(raw)
 
+    def _build_fallback_context(self, hits: List[SearchResult]) -> str:
+
+        parts = []
+
+        for h in hits[:5]:
+
+            text = (h.text or "").strip()
+            if len(text) < 20:
+                continue
+
+            article = h.payload.get("article_number", "?")
+            header = h.payload.get("header", "")
+
+            parts.append(
+                f"Статья {article} — {header}\n{text[:700]}"
+            )
+
+        return "\n\n".join(parts)
+
+
     def _postprocess(self, text: str) -> str:
 
+        if not text:
+            return "Недостаточно данных."
+
         text = re.sub(r"<.*?>", "", text)
-        text = re.sub(r"\n{3,}", "\n\n", text)
 
-        if text.count("Ответ:") > 1:
-            text = "Ответ:" + text.split("Ответ:")[1]
+        text = re.sub(r"(?i)^(a|answer|ответ):\s*", "", text)
 
-        text = re.sub(r"Вот ответ:?", "", text, flags=re.IGNORECASE)
+        text = re.sub(
+            r"(?i)(нужно ответить|сначала|важно|убеждаюсь|let'?s|okay|i need).*",
+            "",
+            text
+        )
 
-        text = self._deduplicate_bullets(text)
+        text = re.sub(r"^\s*[-•*]\s+", "", text, flags=re.MULTILINE)
 
-        if "Источник:" not in text:
-            text += "\n\nИсточник:\n-"
+        text = re.sub(r"\s+", " ", text).strip()
 
-        return text.strip()
+        if len(text.split()) < 4:
+            return "Недостаточно данных."
 
-    def _deduplicate_bullets(self, text: str) -> str:
-        lines = text.splitlines()
-        seen = set()
-        result = []
+        return text
 
-        for line in lines:
-            stripped = line.strip().lower()
 
-            if stripped.startswith("-"):
-                if stripped in seen:
-                    continue
-                seen.add(stripped)
-
-            result.append(line)
-
-        return "\n".join(result)
+    def close(self):
+        try:
+            self.llm.close()
+        except Exception:
+            pass

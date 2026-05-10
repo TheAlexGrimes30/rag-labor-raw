@@ -96,10 +96,17 @@ class ClassicRAG:
     def close(self):
         print("Shutting down RAG...")
 
-        if hasattr(self.generator, "llm") and hasattr(self.generator.llm, "close"):
-            self.generator.llm.close()
+        try:
+            if hasattr(self.generator, "llm"):
+                self.generator.llm = None
 
-        self.client.close()
+        except Exception as e:
+            print("[WARN] LLM cleanup error:", repr(e))
+
+        try:
+            self.client.close()
+        except Exception as e:
+            print("[WARN] Qdrant close error:", repr(e))
 
 def debug_chunks(chunks: List[Chunk]):
     print("\n[DEBUG] ===== CHUNK QUALITY =====")
@@ -152,23 +159,36 @@ if __name__ == "__main__":
 
     try:
         questions = [
-            "какие цели трудового законодательства",
-            "что регулирует трудовое законодательство",
-            "что такое свобода труда",
-            "какие принципы трудового права",
+            "какие цели трудового законодательства"
         ]
 
         for q in questions:
             print("\nQ:", q)
-            retriever.debug_query(q, top_k=10)
-            hits = retriever.retrieve(q, top_k=25)
-            reranker.debug_rerank(q, hits)
-            #debug_chunks(chunks)
-            #save_chunks_to_txt(chunks)
-            #retriever.debug_embedding_inputs(chunks)
-            #retriever.debug_query_embedding(q)
-            res = rag.ask(q)
-            print("A:", res.answer)
+
+            try:
+                retriever.debug_query(q, top_k=10)
+
+                hits = retriever.retrieve(q, top_k=25)
+
+                reranker.debug_rerank(q, hits)
+
+                res = rag.ask(q)
+
+                print("A:", res.answer)
+
+            except Exception as e:
+                print("\n[ERROR] Ошибка при обработке вопроса:")
+                print("Question:", q)
+                print("Error:", repr(e))
+
+                continue
+
+    except Exception as e:
+        print("\n[CRITICAL ERROR] Сбой всей RAG системы:")
+        print(repr(e))
 
     finally:
-        rag.close()
+        try:
+            rag.close()
+        except Exception as e:
+            print("\n[WARN] Ошибка при закрытии ресурсов:", repr(e))

@@ -5,7 +5,7 @@ import hashlib
 
 from sentence_transformers import SentenceTransformer
 
-from classic_rag.Hybrid.rag_config import SearchResult
+from classic_rag.Hybrid.search_result import SearchResult
 
 
 class BaseDenseRetriever(ABC):
