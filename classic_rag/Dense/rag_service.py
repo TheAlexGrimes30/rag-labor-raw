@@ -22,7 +22,6 @@ class RAGService:
         self.max_context_chars = max_context_chars
         self.min_final_score = min_final_score
 
-
     def ask(self, query: str) -> RAGResponse:
 
         hits = self.retriever.retrieve(query=query, top_k=25)
@@ -59,12 +58,10 @@ class RAGService:
             sources=sources
         )
 
-
     def _sanitize_context(self, text: str) -> str:
         text = re.sub(r"(?i)\b(a:|q:)\b", "", text)
         text = re.sub(r"\bНедостаточно данных\b.*", "", text, flags=re.IGNORECASE)
         return text.strip()
-
 
     def _filter_hits(self, hits: List[SearchResult]) -> List[SearchResult]:
 
@@ -95,7 +92,6 @@ class RAGService:
 
         return filtered
 
-
     def _build_context(self, hits: List[SearchResult]) -> str:
 
         parts = []
@@ -120,7 +116,7 @@ class RAGService:
 
             block = f"""
             Статья {article} — {header}
-            
+
             {text[:800]}
             """.strip()
 
@@ -131,7 +127,6 @@ class RAGService:
             size += len(block)
 
         return "\n\n".join(parts)
-
 
     def _fallback_context(self, hits: List[SearchResult]) -> str:
 
@@ -153,10 +148,8 @@ class RAGService:
 
         return "\n\n".join(parts)
 
-
     def _normalize(self, text: str) -> str:
         return re.sub(r"\s+", " ", text.lower()).strip()
-
 
     def _validate_and_fix(self, text: str) -> str:
 
@@ -182,8 +175,8 @@ class RAGService:
 
         if bullets:
             return "Трудовое законодательство устанавливает " + \
-                   ", ".join(b.strip(" .") for b in bullets) + \
-                   " в соответствии с Трудовым кодексом РФ."
+                ", ".join(b.strip(" .") for b in bullets) + \
+                " в соответствии с Трудовым кодексом РФ."
 
         text = re.sub(r"\s+", " ", text).strip()
 

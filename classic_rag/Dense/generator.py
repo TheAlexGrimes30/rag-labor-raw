@@ -5,6 +5,7 @@ from typing import List
 from llama_cpp import Llama
 from classic_rag.Dense.search_result import SearchResult
 
+
 class BaseLLMClient(ABC):
 
     @abstractmethod
@@ -37,10 +38,10 @@ class BaseGenerator(ABC):
     ) -> str:
         raise NotImplementedError
 
+
 class ContextCleaner(BaseContextCleaner):
 
     def clean_context(self, text: str) -> str:
-
         text = re.sub(r"#+", "", text)
         text = re.sub(r"\*+", "", text)
         text = re.sub(r"\n{3,}", "\n\n", text)
@@ -52,7 +53,6 @@ class ContextCleaner(BaseContextCleaner):
 class QwenClient(BaseLLMClient):
 
     def __init__(self, model_path: str):
-
         self.llm = Llama(
             model_path=str(model_path),
             n_ctx=4096,
@@ -61,7 +61,6 @@ class QwenClient(BaseLLMClient):
         )
 
     def generate(self, prompt: str) -> str:
-
         output = self.llm.create_chat_completion(
             messages=[
                 {
@@ -111,16 +110,15 @@ class QwenClient(BaseLLMClient):
 class LaborPromptBuilder(BasePromptBuilder):
 
     def build(self, query: str, context: str) -> str:
-
         return f"""
         Ты юридическая система по Трудовому кодексу РФ.
-        
+
         =====================
         ИНСТРУКЦИЯ
         =====================
-        
+
         Верни только готовый юридический ответ.
-        
+
         Строго запрещено:
         - рассуждения
         - reasoning
@@ -129,40 +127,39 @@ class LaborPromptBuilder(BasePromptBuilder):
         - chain of thought
         - описание процесса
         - служебные фразы
-        
+
         Не используй:
         - "Нужно ответить"
         - "Важно"
         - "Сначала"
         - "Убеждаюсь"
-        
+
         Формат ответа:
         - один связный юридический текст
         - без списка
         - без вступления
         - без пояснений
         - в конце обязательно укажи источник
-        
+
         Пример формата:
         Трудовое законодательство устанавливает ... в соответствии с Трудовым кодексом РФ, статья 1.
-        
+
         =====================
         КОНТЕКСТ
         =====================
-        
+
         {context}
-        
+
         =====================
         ВОПРОС
         =====================
-        
+
         {query}
-        
+
         =====================
         ФИНАЛЬНЫЙ ОТВЕТ
         =====================
         """.strip()
-
 
 
 class Generator(BaseGenerator):
@@ -215,7 +212,6 @@ class Generator(BaseGenerator):
 
         return "\n\n".join(parts)
 
-
     def _postprocess(self, text: str) -> str:
 
         if not text:
@@ -239,7 +235,6 @@ class Generator(BaseGenerator):
             return "Недостаточно данных."
 
         return text
-
 
     def close(self):
         try:
