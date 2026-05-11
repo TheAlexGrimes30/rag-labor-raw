@@ -16,9 +16,69 @@ from classic_rag.Dense.retriever import Retriever, Embedder
 from classic_rag.Dense.storage import VectorStore
 
 dataset = [
+
     {
+        "id": 1,
         "question": "какие цели трудового законодательства",
-        "relevant_article": 1
+        "relevant_articles": [1],
+        "hard_negatives": [2, 11, 56],
+        "category": "general_definition"
+    },
+
+    {
+        "id": 2,
+        "question": "что регулирует трудовое законодательство",
+        "relevant_articles": [1, 11],
+        "hard_negatives": [10, 56, 106],
+        "category": "scope"
+    },
+
+    {
+        "id": 3,
+        "question": "обязанности работодателя",
+        "relevant_articles": [22, 15],
+        "hard_negatives": [56, 91],
+        "category": "employer_rights"
+    },
+
+    {
+        "id": 4,
+        "question": "что такое трудовой договор",
+        "relevant_articles": [56],
+        "hard_negatives": [15, 22],
+        "category": "definitions"
+    },
+
+    {
+        "id": 5,
+        "question": "время отдыха работников",
+        "relevant_articles": [106, 107, 108],
+        "hard_negatives": [1, 10],
+        "category": "labor_conditions"
+    },
+
+    {
+        "id": 6,
+        "question": "перерывы в рабочем времени",
+        "relevant_articles": [108],
+        "hard_negatives": [106, 107],
+        "category": "working_time"
+    },
+
+    {
+        "id": 7,
+        "question": "международные нормы в трудовом праве",
+        "relevant_articles": [10],
+        "hard_negatives": [1, 11],
+        "category": "legal_system"
+    },
+
+    {
+        "id": 8,
+        "question": "контроль за соблюдением трудового законодательства",
+        "relevant_articles": [1, 11],
+        "hard_negatives": [22, 56],
+        "category": "supervision"
     }
 ]
 
@@ -117,42 +177,32 @@ class ClassicRAG:
             print("[WARN] Qdrant close error:", repr(e))
 
 
-def recall_at_k(retrieved_articles: List[int], relevant_article: int) -> float:
-    print("Recall")
-    print(f"Retrieved: {retrieved_articles}")
-    print(f"Relevant: {relevant_article}")
 
-    return float(relevant_article in retrieved_articles)
-
-
-def precision_at_k(retrieved_articles: List[int], relevant_article: int) -> float:
-    print("Precision")
-    print(f"Retrieved: {retrieved_articles}")
-    print(f"Relevant: {relevant_article}")
-
-    if not retrieved_articles:
+def recall_at_k(retrieved: List[int], relevant: List[int]) -> float:
+    if not relevant:
         return 0.0
-
-    hits = sum(1 for a in retrieved_articles if a == relevant_article)
-    return hits / len(retrieved_articles)
+    return float(len(set(retrieved) & set(relevant)) > 0)
 
 
-def mrr_at_k(retrieved_articles: List[int], relevant_article: int) -> float:
-    print("MRR")
-    print(f"Retrieved: {retrieved_articles}")
-    print(f"Relevant: {relevant_article}")
+def precision_at_k(retrieved: List[int], relevant: List[int]) -> float:
+    if not retrieved:
+        return 0.0
+    hits = sum(1 for a in retrieved if a in relevant)
+    return hits / len(retrieved)
 
-    for i, a in enumerate(retrieved_articles):
-        if a == relevant_article:
+
+def mrr_at_k(retrieved: List[int], relevant: List[int]) -> float:
+    for i, a in enumerate(retrieved):
+        if a in relevant:
             return 1.0 / (i + 1)
-
     return 0.0
 
-def evaluate_rag(rag: ClassicRAG, dataset, output_path="rag_eval_results.json"):
 
-    ragas_rows = []
+def evaluate_rag(rag, dataset, output_path="rag_eval_results.json"):
 
-    retriever_scores = {
+    results = []
+
+    metrics = {
         "recall": [],
         "precision": [],
         "mrr": []
@@ -161,8 +211,8 @@ def evaluate_rag(rag: ClassicRAG, dataset, output_path="rag_eval_results.json"):
     for item in dataset:
 
         query = item["question"]
-        relevant_article = int(item["relevant_article"])  # 🔥 FIX
-
+        relevant_articles = item.get("relevant_articles", [])
+        hard_negatives = item.get("hard_negatives", [])
         hits = rag.rag_service.retriever.retrieve(query, top_k=5)
 
         retrieved_articles = [
@@ -171,16 +221,16 @@ def evaluate_rag(rag: ClassicRAG, dataset, output_path="rag_eval_results.json"):
             if h.payload.get("article_number") is not None
         ]
 
-        retriever_scores["recall"].append(
-            recall_at_k(retrieved_articles, relevant_article)
+        metrics["recall"].append(
+            recall_at_k(retrieved_articles, relevant_articles)
         )
 
-        retriever_scores["precision"].append(
-            precision_at_k(retrieved_articles, relevant_article)
+        metrics["precision"].append(
+            precision_at_k(retrieved_articles, relevant_articles)
         )
 
-        retriever_scores["mrr"].append(
-            mrr_at_k(retrieved_articles, relevant_article)
+        metrics["mrr"].append(
+            mrr_at_k(retrieved_articles, relevant_articles)
         )
 
         reranked = rag.rag_service.reranker.rerank(query, hits)
@@ -189,40 +239,39 @@ def evaluate_rag(rag: ClassicRAG, dataset, output_path="rag_eval_results.json"):
 
         response = rag.ask(query)
 
-        ragas_rows.append({
+        results.append({
             "question": query,
             "answer": response.answer,
             "contexts": contexts,
-            "relevant_article": relevant_article,
+            "relevant_articles": relevant_articles,
+            "hard_negatives": hard_negatives,
             "retrieved_articles": retrieved_articles
         })
 
-    retriever_report = {
-        "recall@5": sum(retriever_scores["recall"]) / len(dataset),
-        "precision@5": sum(retriever_scores["precision"]) / len(dataset),
-        "mrr@5": sum(retriever_scores["mrr"]) / len(dataset),
+    report = {
+        "recall@5": sum(metrics["recall"]) / len(dataset),
+        "precision@5": sum(metrics["precision"]) / len(dataset),
+        "mrr@5": sum(metrics["mrr"]) / len(dataset),
     }
 
     print("\n================ RETRIEVER METRICS ================\n")
-    print(retriever_report)
+    print(report)
 
-
-    output_data = {
-        "retriever_metrics": retriever_report,
-        "samples": ragas_rows
+    output = {
+        "retriever_metrics": report,
+        "samples": results
     }
 
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, ensure_ascii=False, indent=4)
+        json.dump(output, f, ensure_ascii=False, indent=4)
 
-    pd.DataFrame(ragas_rows).to_csv(
+    pd.DataFrame(results).to_csv(
         output_path.replace(".json", ".csv"),
         index=False,
         encoding="utf-8"
     )
 
-    print(f"\nsaved -> {output_path}")
-
+    print(f"\nSaved -> {output_path}")
 
 if __name__ == "__main__":
 
