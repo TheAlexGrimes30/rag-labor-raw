@@ -29,7 +29,7 @@ class RAGService:
 
         reranked = self.reranker.rerank(query=query, hits=hits, top_n=10)
 
-        filtered = self._filter_hits(reranked)
+        filtered = self._filter_hits(query, reranked)
 
         if not filtered:
             filtered = reranked[:5]
@@ -59,17 +59,17 @@ class RAGService:
             sources=sources
         )
 
-
     def _sanitize_context(self, text: str) -> str:
         text = re.sub(r"(?i)\b(a:|q:)\b", "", text)
         text = re.sub(r"\bНедостаточно данных\b.*", "", text, flags=re.IGNORECASE)
         return text.strip()
 
-
-    def _filter_hits(self, hits: List[SearchResult]) -> List[SearchResult]:
+    def _filter_hits(self, query: str, hits: List[SearchResult]) -> List[SearchResult]:
 
         filtered = []
-        seen: Set[tuple] = set()
+        seen = set()
+
+        q = query.lower()
 
         for h in hits:
 
@@ -90,11 +90,10 @@ class RAGService:
             seen.add(key)
             filtered.append(h)
 
-            if len(filtered) >= 6:
+            if len(filtered) >= 5:
                 break
 
         return filtered
-
 
     def _build_context(self, hits: List[SearchResult]) -> str:
 
@@ -181,9 +180,11 @@ class RAGService:
         bullets = re.findall(r"(?:^|\n)-\s+(.*)", text)
 
         if bullets:
-            return "Трудовое законодательство устанавливает " + \
-                   ", ".join(b.strip(" .") for b in bullets) + \
-                   " в соответствии с Трудовым кодексом РФ."
+            return (
+                "Трудовое законодательство устанавливает "
+                + ", ".join(b.strip(" .") for b in bullets)
+                + " в соответствии с Трудовым кодексом РФ."
+            )
 
         text = re.sub(r"\s+", " ", text).strip()
 
@@ -191,6 +192,7 @@ class RAGService:
             return "Недостаточно данных."
 
         return text
+
 
     def _build_sources(self, hits: List[SearchResult]) -> List[str]:
 
