@@ -116,4 +116,3 @@ class Chunk:
             "article_number": self.metadata.article_number,
             "topics": self.metadata.topics,
         }
-    
