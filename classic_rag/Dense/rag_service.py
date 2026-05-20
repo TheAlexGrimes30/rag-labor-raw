@@ -25,7 +25,6 @@ class RAGService:
     def ask(self, query: str) -> RAGResponse:
 
         hits = self.retriever.retrieve(query=query, top_k=25)
-
         reranked = self.reranker.rerank(query=query, hits=hits, top_n=10)
 
         filtered = self._filter_hits(reranked)
@@ -35,7 +34,7 @@ class RAGService:
 
         context = self._build_context(filtered)
 
-        if len(context.strip()) < 30:
+        if len(context.strip()) < 80:
             context = self._fallback_context(reranked[:5])
 
         context = self._sanitize_context(context)
@@ -46,7 +45,7 @@ class RAGService:
             hits=filtered
         )
 
-        answer = self._validate_and_fix(raw_answer)
+        answer = self._validate_and_fix(raw_answer, filtered)
 
         sources = self._build_sources(filtered)
 
@@ -61,7 +60,12 @@ class RAGService:
     def _sanitize_context(self, text: str) -> str:
         text = re.sub(r"(?i)\b(a:|q:)\b", "", text)
         text = re.sub(r"\bНедостаточно данных\b.*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
         return text.strip()
+
+    def _normalize(self, text: str) -> str:
+        return re.sub(r"\s+", " ", text.lower()).strip()
 
     def _filter_hits(self, hits: List[SearchResult]) -> List[SearchResult]:
 
@@ -101,8 +105,7 @@ class RAGService:
         for h in hits:
 
             text = (h.text or "").strip()
-
-            if len(text) < 30:
+            if len(text) < 40:
                 continue
 
             norm = self._normalize(text)
@@ -113,12 +116,12 @@ class RAGService:
 
             article = h.payload.get("article_number", "?")
             header = h.payload.get("header", "")
+            source = h.payload.get("source", "Нормативный акт")
 
-            block = f"""
-            Статья {article} — {header}
+            block = f"""[СТАТЬЯ {article} — {source}]
+            {header}
 
-            {text[:800]}
-            """.strip()
+            {text[:900]}""".strip()
 
             if size + len(block) > self.max_context_chars:
                 break
@@ -135,23 +138,19 @@ class RAGService:
         for h in hits:
 
             text = (h.text or "").strip()
-
-            if len(text) < 50:
+            if len(text) < 60:
                 continue
 
             article = h.payload.get("article_number", "?")
-            header = h.payload.get("header", "")
+            source = h.payload.get("source", "Нормативный акт")
 
             parts.append(
-                f"Статья {article} — {header}\n{text[:500]}"
+                f"[СТАТЬЯ {article} — {source}]\n{text[:600]}"
             )
 
         return "\n\n".join(parts)
 
-    def _normalize(self, text: str) -> str:
-        return re.sub(r"\s+", " ", text.lower()).strip()
-
-    def _validate_and_fix(self, text: str) -> str:
+    def _validate_and_fix(self, text: str, hits: List[SearchResult]) -> str:
 
         if not text:
             return "Недостаточно данных."
@@ -160,23 +159,30 @@ class RAGService:
 
         text = re.sub(r"(?i)^(a:|q:)\s*", "", text)
 
-        bad_patterns = [
-            r"(?is)^(okay|let's|first|i need|the user).*?$",
-            r"(?is)^(нужно ответить|сначала|важно|убеждаюсь).*?$",
-            r"(?is)reasoning|analysis|explanation"
-        ]
-
-        for p in bad_patterns:
-            text = re.sub(p, "", text)
+        text = re.sub(
+            r"(?is)\b(reasoning|analysis|explanation|let's|okay|first|i need)\b.*",
+            "",
+            text
+        )
 
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
 
-        bullets = re.findall(r"(?:^|\n)-\s+(.*)", text)
+        allowed_articles = {
+            str(h.payload.get("article_number"))
+            for h in hits
+            if h.payload.get("article_number")
+        }
 
+        def fix_article(match):
+            art = match.group(1)
+            return f"статья {art}" if art in allowed_articles else "статья ?"
+
+        text = re.sub(r"статья\s+(\d+)", fix_article, text)
+
+        bullets = re.findall(r"(?:^|\n)-\s+(.*)", text)
         if bullets:
-            return "Трудовое законодательство устанавливает " + \
-                ", ".join(b.strip(" .") for b in bullets) + \
-                " в соответствии с Трудовым кодексом РФ."
+            return "Норма права устанавливает " + \
+                ", ".join(b.strip(" .") for b in bullets)
 
         text = re.sub(r"\s+", " ", text).strip()
 
@@ -193,10 +199,15 @@ class RAGService:
         for h in hits:
 
             article = h.payload.get("article_number")
+            source = h.payload.get("source")
+
             if not article:
                 continue
 
-            src = f"Трудовой кодекс РФ, статья {article}"
+            if not source:
+                source = "Нормативный акт"
+
+            src = f"{source}, статья {article}"
 
             if src not in seen:
                 seen.add(src)

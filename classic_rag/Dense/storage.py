@@ -13,7 +13,13 @@ from qdrant_client.http.models import (
 @dataclass
 class VectorStore:
     """
-    Абстракция над Qdrant vector store.
+    Thin wrapper over Qdrant vector database.
+
+    Provides:
+    - collection management
+    - batch upsert of embeddings
+    - vector similarity search
+    - payload normalization
     """
 
     client: QdrantClient
@@ -23,6 +29,12 @@ class VectorStore:
 
 
     def ensure_collection(self) -> None:
+        """
+        Ensure that Qdrant collection exists.
+
+        If collection does not exist, it is created
+        with predefined vector size and distance metric.
+        """
 
         if not self.client.collection_exists(self.collection_name):
             self.client.create_collection(
@@ -36,11 +48,31 @@ class VectorStore:
 
     def upsert(
         self,
-        ids: List[str],
-        vectors: List[List[float]],
-        payloads: List[dict],
+        ids: list[str],
+        vectors: list[list[float]],
+        payloads: list[dict],
         batch_size: int = 64,
     ) -> None:
+        """
+        Insert or update embeddings in Qdrant.
+
+        Args:
+            ids (List[str]):
+                Unique chunk/document identifiers.
+
+            vectors (List[List[float]]):
+                Embedding vectors corresponding to documents.
+
+            payloads (List[dict]):
+                Metadata payloads for each vector.
+
+            batch_size (int):
+                Batch size for Qdrant upsert requests.
+
+        Raises:
+            ValueError:
+                If input data is empty or invalid.
+        """
 
         if not ids or not vectors:
             raise ValueError("[VectorStore] Empty ids or vectors")
@@ -75,10 +107,27 @@ class VectorStore:
 
     def search(
         self,
-        query_vector: List[float],
+        query_vector: list[float],
         limit: int = 10,
         query_filter: Optional[Filter] = None,
-    ) -> List[Any]:
+    ) -> list[Any]:
+        """
+        Perform similarity search in Qdrant collection.
+
+        Args:
+            query_vector (List[float]):
+                Query embedding vector.
+
+            limit (int):
+                Number of nearest neighbors to return.
+
+            uery_filter (Optional[Filter]):
+                    Optional Qdrant filter for metadata filtering.
+
+        Returns:
+            List[Any]:
+                Search results (Qdrant points).
+        """
 
         if not query_vector:
             return []
@@ -95,12 +144,28 @@ class VectorStore:
 
 
     def delete_collection(self) -> None:
+        """
+        Delete Qdrant collection if it exists.
+        """
 
         if self.client.collection_exists(self.collection_name):
             self.client.delete_collection(self.collection_name)
 
 
-    def _normalize_payload(self, p: Optional[Dict]) -> Dict:
+    def _normalize_payload(self, p: Optional[dict]) -> dict:
+        """
+        Normalize metadata payload before storing in Qdrant.
+
+        Ensures consistent schema across all vectors.
+
+        Args:
+            p (Optional[Dict]):
+                Raw payload dictionary.
+
+        Returns:
+            Dict:
+                Normalized payload.
+        """
 
         p = p or {}
 

@@ -6,14 +6,13 @@ from classic_rag.Dense.generator import Generator, QwenClient, LaborPromptBuilde
 from classic_rag.Dense.index_service import IndexService
 from classic_rag.Dense.ingestion import IngestionPipeline, MarkdownDocumentLoader, IngestionService
 from classic_rag.Dense.rag_chunkers import HybridLegalChunker
-from classic_rag.Dense.rag_config import RAGResponse, Chunk
+from classic_rag.Dense.rag_config import RAGResponse
 from classic_rag.Dense.rag_dataset import dataset
 from classic_rag.Dense.rag_evaluation import evaluate_rag
 from classic_rag.Dense.rag_service import RAGService
 from classic_rag.Dense.reranker import Reranker
-from classic_rag.Dense.retriever import Retriever, Embedder
+from classic_rag.Dense.dense_retriever import Retriever, Embedder
 from classic_rag.Dense.storage import VectorStore
-
 
 
 class ClassicRAG:
@@ -21,7 +20,7 @@ class ClassicRAG:
     def __init__(self):
         base_path = Path(__file__).resolve()
         project_root = base_path.parents[2]
-        rag_db_path = project_root / "rag_db"
+        rag_db_path = project_root / "rag_db2"
 
         loader = MarkdownDocumentLoader(str(rag_db_path))
 
@@ -42,7 +41,7 @@ class ClassicRAG:
 
         vector_store = VectorStore(
             client=client,
-            collection_name="labor_rag_dense_collection",
+            collection_name="credit_rag_dense_collection",
             vector_size=embedder.dim
         )
 
