@@ -195,6 +195,9 @@ class Generator(BaseGenerator):
 
     def close(self):
         try:
-            self.llm.close()
+            if self.llm is not None:
+                self.llm.close()
         except Exception:
             pass
+        finally:
+            self.llm = None

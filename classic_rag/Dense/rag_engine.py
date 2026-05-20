@@ -1,26 +1,55 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import List
 
 from qdrant_client import QdrantClient
+from qdrant_client.http.models import Distance
 
-from classic_rag.Dense.generator import QwenClient, Generator, LaborPromptBuilder, ContextCleaner
+from classic_rag.Dense.dense_retriever import Embedder, Retriever
+from classic_rag.Dense.generator import QwenClient, LaborPromptBuilder, Generator, ContextCleaner
 from classic_rag.Dense.index_service import IndexService
-from classic_rag.Dense.ingestion import MarkdownDocumentLoader, IngestionPipeline, IngestionService
+from classic_rag.Dense.ingestion import IngestionPipeline, MarkdownDocumentLoader, IngestionService
 from classic_rag.Dense.rag_chunkers import HybridLegalChunker
-from classic_rag.Dense.rag_config import RAGResponse
 from classic_rag.Dense.rag_service import RAGService
 from classic_rag.Dense.reranker import Reranker
-from classic_rag.Dense.dense_retriever import Embedder, Retriever
+from classic_rag.Dense.search_result import SearchResult
 from classic_rag.Dense.storage import VectorStore
 
 
 class RAG:
+    """
+    Main RAG pipeline.
 
-    def __init__(self):
+    Responsibilities:
+    - document ingestion
+    - chunk indexing
+    - vector retrieval
+    - reranking
+    - answer generation
+    """
+
+    def __init__(self) -> None:
+        """
+        Initialize all RAG components.
+
+        Returns:
+            None
+        """
+
         base_path = Path(__file__).resolve()
         project_root = base_path.parents[2]
-        rag_db_path = project_root / "rag_db2"
+        model_path = project_root / "models" / "Qwen3-8B-Q4_K_M.gguf"
 
-        loader = MarkdownDocumentLoader(str(rag_db_path))
+        rag_db_path = project_root / "rag_db"
+
+        self.debug_path = project_root / "debug"
+
+
+
+        loader = MarkdownDocumentLoader(
+            str(rag_db_path)
+        )
 
         parser = HybridLegalChunker()
 
@@ -29,111 +58,414 @@ class RAG:
             chunker=parser
         )
 
-        self.ingestion = IngestionService(pipeline)
-
-        embedder = Embedder(
-            model_name="Qwen/Qwen3-Embedding-0.6B"
-        )
-
-        client = QdrantClient(host="localhost", port=6333)
-
-        vector_store = VectorStore(
-            client=client,
-            collection_name="credit_collection",
-            vector_size=embedder.dim
-        )
-
-        vector_store.ensure_collection()
-
-        self.index_service = IndexService(vector_store, embedder)
-
-        retriever = Retriever(
-            vector_store=vector_store,
-            embedder=embedder
+        self.ingestion = IngestionService(
+            pipeline
         )
 
 
-        model_path = project_root / "models" / "Qwen3-8B-Q4_K_M.gguf"
-
-        llm = QwenClient(str(model_path))
-
-        generator = Generator(
-            llm=llm,
-            prompt_builder=LaborPromptBuilder(),
-            cleaner=ContextCleaner()
+        self.embedder = Embedder(
+            model_name="Qwen/Qwen3-Embedding-0.6B",
+            normalize=True
         )
 
-        reranker = Reranker()
-        self.rag_service = RAGService(retriever, reranker, generator)
-        self.client = client
-        self.generator = generator
 
-        print("Running ingestion...")
-        self.chunks = self.ingestion.load_chunks()
+        self.qdrant = QdrantClient(
+            "localhost",
+            port=6333
+        )
 
-        print(f"\n[DEBUG] Total chunks: {len(self.chunks)}")
+        self.vector_store = VectorStore(
+            client=self.qdrant,
+            collection_name="labor_dense_collection",
+            vector_size=self.embedder.dim,
+            distance=Distance.COSINE
+        )
 
-        for c in self.chunks[:20]:
-            print(c.metadata.article_number, "|", c.metadata.header)
-
-        for i, c in enumerate(self.chunks[:5]):
-            payload = c.to_payload()
-
-            print(f"\n--- CHUNK {i} ---")
-            print(f"text: {c.text[:200]}")
-            print(f"file: {payload.get('file')}")
-            print(f"article: {payload.get('article_number')}")
-            print(f"header: {payload.get('header')}")
-
-        print("Indexing...")
-        self.index_service.index(self.chunks)
+        self.vector_store.ensure_collection()
 
 
-    def ask(self, query: str) -> RAGResponse:
-        return self.rag_service.ask(query)
+        self.index_service = IndexService(
+            vector_store=self.vector_store,
+            embedder=self.embedder
+        )
 
-    def close(self):
-        print("Shutting down RAG...")
+        self.retriever = Retriever(
+            vector_store=self.vector_store,
+            embedder=self.embedder,
+            max_pool_size=50
+        )
+
+
+        self.reranker = Reranker(
+            model_name="BAAI/bge-reranker-v2-m3",
+            top_n=5
+        )
+
+        self.llm = QwenClient(model_path=str(model_path))
+
+        self.prompt_builder = LaborPromptBuilder()
+
+        self.cleaner = ContextCleaner()
+
+        self.generator = Generator(
+            llm=self.llm,
+            prompt_builder=self.prompt_builder,
+            cleaner=self.cleaner
+        )
+
+        self.rag_service = RAGService(
+            retriever=self.retriever,
+            reranker=self.reranker,
+            generator=self.generator,
+            max_context_chars=3500,
+            min_final_score=0.50
+        )
+
+    def build_and_index(self) -> List:
+        """
+        Load chunks and index them if collection is empty.
+
+        Returns:
+            List:
+                List of loaded chunks.
+        """
+
+        print("\nLoading chunks...\n")
+
+        chunks = self.ingestion.load_chunks()
+
+        print(f"Loaded chunks: {len(chunks)}")
+
+        self.index_if_needed(chunks)
+
+        return chunks
+
+    def index_if_needed(
+        self,
+        chunks: List
+    ) -> None:
+        """
+        Index chunks only if collection is empty.
+
+        Args:
+            chunks (List):
+                List of document chunks.
+
+        Returns:
+            None
+        """
+
+        collection = self.vector_store.collection_name
+
+        info = self.qdrant.get_collection(
+            collection
+        )
+
+        points_count = info.points_count
+
+        if points_count > 0:
+
+            print(
+                f"[Index] Skipping indexing — "
+                f"collection already has "
+                f"{points_count} points"
+            )
+
+            return
+
+        print(
+            "[Index] Collection empty — "
+            "starting indexing..."
+        )
+
+        self.index_service.index(chunks)
+
+        print("[Index] Done indexing")
+
+    def search(
+        self,
+        query: str,
+        retrieve_top_k: int = 20,
+        rerank_top_n: int = 5,
+        use_reranker: bool = True
+    ) -> List[SearchResult]:
+        """
+        Perform retrieval and optional reranking.
+
+        Args:
+            query (str):
+                User query.
+
+            retrieve_top_k (int):
+                Number of retrieved chunks.
+
+            rerank_top_n (int):
+                Number of final reranked chunks.
+
+            use_reranker (bool):
+                Whether to apply reranking.
+
+        Returns:
+            List[SearchResult]:
+                Final search results.
+        """
+
+        hits = self.retriever.retrieve(
+            query=query,
+            top_k=retrieve_top_k
+        )
+
+        if not use_reranker:
+            return hits[:rerank_top_n]
+
+        return self.reranker.rerank(
+            query=query,
+            hits=hits,
+            top_n=rerank_top_n
+        )
+
+    def ask(
+        self,
+        query: str
+    ) -> str:
+        """
+        Generate final answer using full RAG pipeline.
+
+        Args:
+            query (str):
+                User query.
+
+        Returns:
+            str:
+                Final generated answer.
+        """
+
+        response = self.rag_service.ask(
+            query=query
+        )
+
+        return response.answer
+
+
+    def debug_dense_retrieval(
+        self,
+        query: str,
+        top_k: int = 10
+    ) -> None:
+        """
+        Debug dense retrieval results.
+
+        Args:
+            query (str):
+                Search query.
+
+            top_k (int):
+                Number of retrieved chunks.
+
+        Returns:
+            None
+        """
+
+        print("\n" + "=" * 100)
+
+        print("[DENSE RETRIEVAL DEBUG]")
+
+        print(f"QUERY: {query}")
+
+        print("=" * 100)
+
+        hits = self.retriever.retrieve(
+            query=query,
+            top_k=top_k
+        )
+
+        for i, hit in enumerate(
+            hits,
+            start=1
+        ):
+
+            payload = hit.payload or {}
+
+            print("\n" + "-" * 100)
+
+            print(f"DENSE TOP {i}")
+
+            print(
+                f"SCORE   : "
+                f"{hit.score:.4f}"
+            )
+
+            print(
+                f"ARTICLE : "
+                f"{payload.get('article_number', 'unknown')}"
+            )
+
+            print(
+                f"HEADER  : "
+                f"{payload.get('header', 'unknown')}"
+            )
+
+            print("\nTEXT:\n")
+
+            print(
+                (hit.text or "")[:1200]
+            )
+
+
+    def debug_search_pipeline(
+        self,
+        query: str,
+        retrieve_top_k: int = 20,
+        rerank_top_n: int = 5
+    ) -> None:
+        """
+        Debug full retrieval + reranking pipeline.
+
+        Args:
+            query (str):
+                User query.
+
+            retrieve_top_k (int):
+                Retriever top-k.
+
+            rerank_top_n (int):
+                Final reranker top-n.
+
+        Returns:
+            None
+        """
+
+        print("\n" + "=" * 100)
+
+        print("[FULL SEARCH PIPELINE DEBUG]")
+
+        print(f"QUERY: {query}")
+
+        print("=" * 100)
+
+        dense_hits = self.retriever.retrieve(
+            query=query,
+            top_k=retrieve_top_k
+        )
+
+        print("\n" + "=" * 100)
+
+        print("RERANKER OUTPUT")
+
+        print("=" * 100)
+
+        final_hits = self.reranker.rerank(
+            query=query,
+            hits=dense_hits,
+            top_n=rerank_top_n
+        )
+
+        for i, hit in enumerate(
+            final_hits,
+            start=1
+        ):
+
+            payload = hit.payload or {}
+
+            print("\n" + "-" * 100)
+
+            print(f"FINAL TOP {i}")
+
+            print(
+                f"SCORE   : "
+                f"{hit.score:.4f}"
+            )
+
+            print(
+                f"ARTICLE : "
+                f"{payload.get('article_number')}"
+            )
+
+            print(
+                f"HEADER  : "
+                f"{payload.get('header')}"
+            )
+
+            print("\nTEXT:\n")
+
+            print(
+                (hit.text or "")[:1200]
+            )
+
+    def close(self) -> None:
+        """
+        Release resources.
+        """
 
         try:
-            if hasattr(self.generator, "llm"):
-                self.generator.llm = None
-
-        except Exception as e:
-            print("[WARN] LLM cleanup error:", repr(e))
+            if self.generator:
+                self.generator.close()
+        except Exception:
+            pass
 
         try:
-            self.client.close()
-        except Exception as e:
-            print("[WARN] Qdrant close error:", repr(e))
+            if self.qdrant:
+                self.qdrant.close()
+        except Exception:
+            pass
+
+        try:
+            if self.embedder:
+                del self.embedder
+        except Exception:
+            pass
+
+        try:
+            if self.generator:
+                self.generator.close()
+        except Exception:
+            pass
+
+        print("\nShutting down...")
 
 
 if __name__ == "__main__":
 
     rag = RAG()
 
-    questions = [
-        "какие действия может выполнять должник"
-    ]
-
     try:
 
-        for q in questions:
+        rag.build_and_index()
 
-            print("\n" + "=" * 80)
+        print("\nIndex ready.\n")
 
-            print("QUESTION:")
-            print(q)
 
-            print("=" * 80)
+        query = (
+            "Можно ли работать с 14 лет?"
+        )
 
-            res = rag.ask(q)
+        print("\n" + "=" * 100)
 
-            print("\nANSWER:")
-            print(res.answer)
+        print("[GENERATOR TEST]")
 
-            print("\nSOURCES:")
-            print(res.sources)
+        print("=" * 100)
+
+        print(f"\nQUERY:\n{query}")
+
+        print("\n" + "=" * 100)
+
+        answer = rag.ask(query)
+
+        print("\nANSWER:\n")
+
+        print(answer)
+
+        print("\n" + "=" * 100)
+        rag.debug_dense_retrieval(
+            query=query,
+            top_k=10
+        )
+
+        rag.debug_search_pipeline(
+            query=query,
+            retrieve_top_k=20,
+            rerank_top_n=5
+        )
 
     finally:
 
