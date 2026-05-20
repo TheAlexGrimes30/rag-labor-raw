@@ -2,20 +2,18 @@ from pathlib import Path
 
 from qdrant_client import QdrantClient
 
-from classic_rag.Dense.generator import Generator, QwenClient, LaborPromptBuilder, ContextCleaner
+from classic_rag.Dense.generator import QwenClient, Generator, LaborPromptBuilder, ContextCleaner
 from classic_rag.Dense.index_service import IndexService
-from classic_rag.Dense.ingestion import IngestionPipeline, MarkdownDocumentLoader, IngestionService
+from classic_rag.Dense.ingestion import MarkdownDocumentLoader, IngestionPipeline, IngestionService
 from classic_rag.Dense.rag_chunkers import HybridLegalChunker
 from classic_rag.Dense.rag_config import RAGResponse
-from classic_rag.Dense.rag_dataset import dataset
-from classic_rag.Dense.rag_evaluation import evaluate_rag
 from classic_rag.Dense.rag_service import RAGService
 from classic_rag.Dense.reranker import Reranker
-from classic_rag.Dense.retriever import Retriever, Embedder
+from classic_rag.Dense.retriever import Embedder, Retriever
 from classic_rag.Dense.storage import VectorStore
 
 
-class ClassicRAG:
+class RAG:
 
     def __init__(self):
         base_path = Path(__file__).resolve()
@@ -41,7 +39,7 @@ class ClassicRAG:
 
         vector_store = VectorStore(
             client=client,
-            collection_name="credit_rag_dense_collection",
+            collection_name="credit_collection",
             vector_size=embedder.dim
         )
 
@@ -112,21 +110,31 @@ class ClassicRAG:
 
 if __name__ == "__main__":
 
-    rag = ClassicRAG()
-    retriever = rag.rag_service.retriever
-    reranker = rag.rag_service.reranker
-    chunks = rag.chunks
+    rag = RAG()
+
+    questions = [
+        "какие действия может выполнять должник"
+    ]
 
     try:
-        evaluate_rag(rag, dataset)
 
+        for q in questions:
 
-    except Exception as e:
-        print("\n[CRITICAL ERROR] Сбой всей RAG системы:")
-        print(repr(e))
+            print("\n" + "=" * 80)
+
+            print("QUESTION:")
+            print(q)
+
+            print("=" * 80)
+
+            res = rag.ask(q)
+
+            print("\nANSWER:")
+            print(res.answer)
+
+            print("\nSOURCES:")
+            print(res.sources)
 
     finally:
-        try:
-            rag.close()
-        except Exception as e:
-            print("\n[WARN] Ошибка при закрытии ресурсов:", repr(e))
+
+        rag.close()
