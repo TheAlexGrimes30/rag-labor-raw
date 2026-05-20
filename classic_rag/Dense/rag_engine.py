@@ -9,7 +9,7 @@ from classic_rag.Dense.rag_chunkers import HybridLegalChunker
 from classic_rag.Dense.rag_config import RAGResponse
 from classic_rag.Dense.rag_service import RAGService
 from classic_rag.Dense.reranker import Reranker
-from classic_rag.Dense.retriever import Embedder, Retriever
+from classic_rag.Dense.dense_retriever import Embedder, Retriever
 from classic_rag.Dense.storage import VectorStore
 
 

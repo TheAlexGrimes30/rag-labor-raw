@@ -1,7 +1,7 @@
 from typing import List
 
 from classic_rag.Dense.rag_config import Chunk
-from classic_rag.Dense.retriever import Embedder
+from classic_rag.Dense.dense_retriever import Embedder
 from classic_rag.Dense.storage import VectorStore
 
 

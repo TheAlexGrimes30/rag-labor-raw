@@ -11,7 +11,7 @@ from classic_rag.Dense.rag_dataset import dataset
 from classic_rag.Dense.rag_evaluation import evaluate_rag
 from classic_rag.Dense.rag_service import RAGService
 from classic_rag.Dense.reranker import Reranker
-from classic_rag.Dense.retriever import Retriever, Embedder
+from classic_rag.Dense.dense_retriever import Retriever, Embedder
 from classic_rag.Dense.storage import VectorStore
 
 
