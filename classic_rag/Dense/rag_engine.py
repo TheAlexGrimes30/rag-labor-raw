@@ -66,7 +66,7 @@ class RAG:
 
 
         self.embedder = Embedder(
-            model_name="Qwen/Qwen3-Embedding-0.6B",
+            model_name="BAAI/bge-m3",
             normalize=True
         )
 
@@ -78,7 +78,7 @@ class RAG:
 
         self.vector_store = VectorStore(
             client=self.qdrant,
-            collection_name="labor_dense_collection_6",
+            collection_name="labor_dense_collection_8",
             vector_size=self.embedder.dim,
             distance=Distance.COSINE
         )
@@ -464,7 +464,7 @@ if __name__ == "__main__":
         evaluate_rag(
             rag,
             dataset,
-            output_path="rag_eval_results_6.json",
+            output_path="rag_eval_results_8.json",
             use_reranker=True,
             retrieve_top_k=20,
             rerank_top_n=5
