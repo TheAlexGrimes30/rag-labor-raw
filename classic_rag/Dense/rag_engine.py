@@ -455,18 +455,6 @@ if __name__ == "__main__":
 
         print(answer)
 
-        print("\n" + "=" * 100)
-        rag.debug_dense_retrieval(
-            query=query,
-            top_k=10
-        )
-
-        rag.debug_search_pipeline(
-            query=query,
-            retrieve_top_k=20,
-            rerank_top_n=5
-        )
-
     finally:
 
         rag.close()
