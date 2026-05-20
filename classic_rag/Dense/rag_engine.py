@@ -66,7 +66,7 @@ class RAG:
 
 
         self.embedder = Embedder(
-            model_name="BAAI/bge-m3",
+            model_name="Qwen/Qwen3-Embedding-0.6B",
             normalize=True
         )
 
@@ -78,7 +78,7 @@ class RAG:
 
         self.vector_store = VectorStore(
             client=self.qdrant,
-            collection_name="labor_dense_collection_8",
+            collection_name="labor_dense_collection",
             vector_size=self.embedder.dim,
             distance=Distance.COSINE
         )
@@ -437,38 +437,38 @@ if __name__ == "__main__":
         print("\nIndex ready.\n")
 
 
-        #query = (
-        #    "Можно ли работать с 14 лет?"
-        #)
-
-        #print("\n" + "=" * 100)
-
-        #print("[GENERATOR TEST]")
-
-        #print("=" * 100)
-
-        #print(f"\nQUERY:\n{query}")
-
-        #print("\n" + "=" * 100)
-
-        #answer = rag.ask(query)
-
-        #print("\nANSWER:\n")
-
-        #print(answer)
-
-        print("\n" + "#" * 100)
-        print("[RAG EVALUATION START]")
-        print("#" * 100)
-
-        evaluate_rag(
-            rag,
-            dataset,
-            output_path="rag_eval_results_8.json",
-            use_reranker=True,
-            retrieve_top_k=20,
-            rerank_top_n=5
+        query = (
+            "Можно ли работать с 14 лет?"
         )
+
+        print("\n" + "=" * 100)
+
+        print("[GENERATOR TEST]")
+
+        print("=" * 100)
+
+        print(f"\nQUERY:\n{query}")
+
+        print("\n" + "=" * 100)
+
+        answer = rag.ask(query)
+
+        print("\nANSWER:\n")
+
+        print(answer)
+
+        #print("\n" + "#" * 100)
+        #print("[RAG EVALUATION START]")
+        #print("#" * 100)
+
+        #evaluate_rag(
+        #    rag,
+        #    dataset,
+        #    output_path="rag_eval_results_8.json",
+        #    use_reranker=True,
+        #    retrieve_top_k=20,
+        #    rerank_top_n=5
+        #)
 
     finally:
 
