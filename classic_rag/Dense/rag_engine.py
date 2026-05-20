@@ -11,8 +11,10 @@ from classic_rag.Dense.generator import QwenClient, LaborPromptBuilder, Generato
 from classic_rag.Dense.index_service import IndexService
 from classic_rag.Dense.ingestion import IngestionPipeline, MarkdownDocumentLoader, IngestionService
 from classic_rag.Dense.rag_chunkers import HybridLegalChunker
+from classic_rag.Dense.rag_dataset import dataset
 from classic_rag.Dense.rag_service import RAGService
 from classic_rag.Dense.reranker import Reranker
+from classic_rag.Dense.retrieval_evaluation import evaluate_rag
 from classic_rag.Dense.search_result import SearchResult
 from classic_rag.Dense.storage import VectorStore
 
@@ -435,25 +437,38 @@ if __name__ == "__main__":
         print("\nIndex ready.\n")
 
 
-        query = (
-            "Можно ли работать с 14 лет?"
+        #query = (
+        #    "Можно ли работать с 14 лет?"
+        #)
+
+        #print("\n" + "=" * 100)
+
+        #print("[GENERATOR TEST]")
+
+        #print("=" * 100)
+
+        #print(f"\nQUERY:\n{query}")
+
+        #print("\n" + "=" * 100)
+
+        #answer = rag.ask(query)
+
+        #print("\nANSWER:\n")
+
+        #print(answer)
+
+        print("\n" + "#" * 100)
+        print("[RAG EVALUATION START]")
+        print("#" * 100)
+
+        evaluate_rag(
+            rag,
+            dataset,
+            output_path="rag_eval_results_1.json",
+            use_reranker=True,
+            retrieve_top_k=20,
+            rerank_top_n=5
         )
-
-        print("\n" + "=" * 100)
-
-        print("[GENERATOR TEST]")
-
-        print("=" * 100)
-
-        print(f"\nQUERY:\n{query}")
-
-        print("\n" + "=" * 100)
-
-        answer = rag.ask(query)
-
-        print("\nANSWER:\n")
-
-        print(answer)
 
     finally:
 
