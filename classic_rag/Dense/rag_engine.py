@@ -362,7 +362,7 @@ if __name__ == "__main__":
         evaluate_rag(
             rag,
             dataset,
-            output_path="rag_eval_results_hybrid_2.json",
+            output_path="rag_eval_results_hybrid_4.json",
             use_reranker=True,
             retrieve_top_k=20,
             rerank_top_n=5
