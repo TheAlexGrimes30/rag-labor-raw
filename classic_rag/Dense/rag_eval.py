@@ -2,8 +2,6 @@ import pandas as pd
 from tqdm import tqdm
 import json
 
-from classic_rag.Dense.classic_rag_dense import ClassicRAG
-
 from ragas import evaluate
 
 from ragas.metrics import (
@@ -16,6 +14,8 @@ from ragas.dataset_schema import (
     SingleTurnSample,
     EvaluationDataset,
 )
+
+from classic_rag.Dense.rag_engine import RAG
 
 # =========================
 # LOAD DATASET
@@ -33,7 +33,7 @@ print(dataset.head())
 # INIT RAG
 # =========================
 
-rag = ClassicRAG()
+rag = RAG()
 
 samples = []
 
