@@ -362,7 +362,7 @@ if __name__ == "__main__":
         evaluate_rag(
             rag,
             dataset,
-            output_path="rag_eval_results_hybrid_alpha_bm25_graph.json",
+            output_path="rag_eval_results_hybrid_2.json",
             use_reranker=True,
             retrieve_top_k=20,
             rerank_top_n=5

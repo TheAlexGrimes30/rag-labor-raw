@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Set
+from typing import Any, Optional, Set
 import hashlib
 import math
 import re
@@ -20,8 +20,8 @@ class HybridRetrieverConfig:
     Configuration for Dense + BM25 + GraphRAG hybrid retrieval.
     """
 
-    alpha: float = 0.65
-    graph_weight: float = 0.15
+    alpha: float = 0.8
+    graph_weight: float = 0.1
     pool_multiplier: int = 8
     max_pool_size: int = 80
     min_text_len: int = 40
