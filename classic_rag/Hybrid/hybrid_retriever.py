@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Set
+from typing import List, Set, Protocol, Sequence
 import hashlib
 
 from classic_rag.Dense.embedder import Embedder
@@ -34,29 +34,44 @@ class BaseDenseRetriever(ABC):
     """
     Abstract interface for dense vector retrievers.
 
-    Dense retrievers perform semantic similarity search
-    using embedding vectors.
+    Dense retrievers perform semantic similarity search using embedding vectors.
     """
 
     @abstractmethod
-    def search(
-        self,
-        query_vec: list[float],
-        k: int
-    ) -> list[SearchResult]:
+    def search(self, query_vec: list[float], k: int) -> list[SearchResult]:
         """
         Execute dense vector similarity search.
 
         Args:
-            query_vec (List[float]):
-                Query embedding vector.
-
-            k (int):
-                Number of documents to retrieve.
+            query_vec: Query embedding vector.
+            k: Number of documents to retrieve.
 
         Returns:
-            List[SearchResult]:
-                Retrieved search results.
+            Retrieved search results.
+        """
+
+        raise NotImplementedError
+
+
+class BaseGraphRetriever(ABC):
+    """
+    Abstract interface for Graph RAG retrievers.
+
+    Graph retrievers search over an entity-relation graph and return text nodes
+    connected to the entities or paths relevant to the user query.
+    """
+
+    @abstractmethod
+    def search(self, query: str, k: int) -> list[SearchResult]:
+        """
+        Execute graph-based retrieval.
+
+        Args:
+            query: User query text.
+            k: Number of graph candidates to retrieve.
+
+        Returns:
+            Retrieved graph search results.
         """
 
         raise NotImplementedError
@@ -64,34 +79,39 @@ class BaseDenseRetriever(ABC):
 
 class BaseRetriever(ABC):
     """
-    Abstract interface for retrievers.
-
-    Retriever converts text query into embeddings
-    and returns relevant search results.
+    Abstract interface for application retrievers.
     """
 
     @abstractmethod
-    def retrieve(
-        self,
-        query: str,
-        top_k: int = 10
-    ) -> List[SearchResult]:
+    def retrieve(self, query: str, top_k: int = 10) -> list[SearchResult]:
         """
         Retrieve relevant chunks for a query.
 
         Args:
-            query (str):
-                User query.
-
-            top_k (int):
-                Number of chunks to return.
+            query: User query.
+            top_k: Number of chunks to return.
 
         Returns:
-            List[SearchResult]:
-                Retrieved chunks.
+            Retrieved chunks.
         """
 
         raise NotImplementedError
+
+
+class LlamaIndexRetrieverProtocol(Protocol):
+    """
+    Protocol for LlamaIndex retrievers.
+
+    PropertyGraphIndex.as_retriever(...) returns an object with retrieve(query),
+    therefore the hybrid retriever depends on behavior rather than concrete class.
+    """
+
+    def retrieve(self, query: str) -> Sequence[NodeWithScore]:
+        """
+        Retrieve LlamaIndex nodes for a query.
+        """
+
+        ...
 
 class QdrantDenseRetriever(BaseDenseRetriever):
 
