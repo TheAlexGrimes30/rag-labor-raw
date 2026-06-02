@@ -39,7 +39,9 @@ class RAG:
 
         base_path = Path(__file__).resolve()
         project_root = base_path.parents[2]
-        model_path = project_root / "models" / "Qwen3-8B-Q4_K_M.gguf"
+        llm_path = project_root / "models" / "Mistral-7B-Instruct-v0.3.Q4_K_M.gguf"
+        embedder_path = project_root / "models" / "Qwen3-Embedding-0.6B"
+        reranker_path = project_root / "models" / "bge-reranker-v2-m3"
 
         rag_db_path = project_root / "rag_db"
 
@@ -64,7 +66,7 @@ class RAG:
 
 
         self.embedder = Embedder(
-            model_name="Qwen/Qwen3-Embedding-0.6B",
+            model_name=str(embedder_path),
             normalize=True
         )
 
@@ -97,11 +99,11 @@ class RAG:
 
 
         self.reranker = Reranker(
-            model_name="BAAI/bge-reranker-v2-m3",
+            model_name=str(reranker_path),
             top_n=5
         )
 
-        self.llm = QwenClient(model_path=str(model_path))
+        self.llm = QwenClient(model_path=str(llm_path))
 
         self.prompt_builder = LaborPromptBuilder()
 
