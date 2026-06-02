@@ -1,10 +1,34 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import List, Set
 import hashlib
 
 from classic_rag.Dense.embedder import Embedder
 from classic_rag.Dense.search_result import SearchResult
 
+try:
+    from llama_index.core.schema import NodeWithScore
+except ImportError:  # pragma: no cover
+    NodeWithScore = Any  # type: ignore
+
+@dataclass(frozen=True)
+class HybridRetrieverConfig:
+    """
+    Configuration for hybrid dense + Graph RAG retrieval.
+
+    Attributes:
+        dense_weight: Weight of dense vector retrieval score in final ranking.
+        graph_weight: Weight of Graph RAG retrieval score in final ranking.
+        pool_multiplier: Multiplier used to retrieve a larger candidate pool.
+        max_pool_size: Maximum number of candidates requested from each retriever.
+        min_text_len: Minimum text length allowed in final results.
+    """
+
+    dense_weight: float = 0.65
+    graph_weight: float = 0.35
+    pool_multiplier: int = 8
+    max_pool_size: int = 80
+    min_text_len: int = 40
 
 class BaseDenseRetriever(ABC):
     """
