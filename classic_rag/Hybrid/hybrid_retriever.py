@@ -21,7 +21,7 @@ class HybridRetrieverConfig:
     """
 
     alpha: float = 0.8
-    graph_weight: float = 0.15
+    graph_weight: float = 0.1
     pool_multiplier: int = 8
     max_pool_size: int = 80
     min_text_len: int = 40
@@ -132,151 +132,6 @@ class SearchResultFactory:
             return result
 
 
-class ArticleIdNormalizer:
-    """
-    Normalizes article identifiers from metadata and text.
-
-    The main practical fix is preserving article 133.1.
-    If ingestion or Qdrant metadata stored 133.1 chunks as 133,
-    this normalizer restores 133.1 by source hints or text markers.
-    """
-
-    REGIONAL_MIN_WAGE_MARKERS = (
-        "региональная минимальная заработная плата",
-        "региональной минимальной заработной плате",
-        "регионального соглашения о минимальной заработной плате",
-        "субъекте российской федерации может устанавливаться",
-        "трехсторонней комиссией",
-        "работодателям присоединиться",
-        "мотивированный отказ",
-    )
-
-    @classmethod
-    def normalize(
-            cls,
-            article_number: Any,
-            *,
-            text: str = "",
-            metadata: Optional[dict[str, Any]] = None
-    ) -> Optional[str]:
-        """
-        Normalize article id to a stable string.
-        """
-
-        metadata = metadata or {}
-
-        if article_number is None:
-            article_number = metadata.get("article")
-
-        if article_number is None:
-            article_number = cls._extract_from_metadata_values(metadata)
-
-        if article_number is None:
-            return None
-
-        article = str(article_number).strip()
-
-        if not article:
-            return None
-
-        if article.endswith(".0"):
-            article = article[:-2]
-
-        if article in {"133_1", "133-1"}:
-            return "133.1"
-
-        if article == "133.1":
-            return article
-
-        if article == "133" and cls._looks_like_article_133_1(text, metadata):
-            return "133.1"
-
-        return article
-
-    @classmethod
-    def _extract_from_metadata_values(
-            cls,
-            metadata: dict[str, Any]
-    ) -> Optional[str]:
-        """
-        Try to extract article id from metadata values like source file names.
-        """
-
-        for value in metadata.values():
-            value_text = str(value)
-
-            if "133_1" in value_text or "133.1" in value_text:
-                return "133.1"
-
-            match = re.search(
-                r"article[_\s-]*(\d+)(?:[_\.-](\d+))?",
-                value_text,
-                flags=re.IGNORECASE
-            )
-
-            if not match:
-                continue
-
-            first = match.group(1)
-            second = match.group(2)
-
-            if second:
-                return f"{first}.{second}"
-
-            return first
-
-        return None
-
-    @classmethod
-    def _looks_like_article_133_1(
-            cls,
-            text: str,
-            metadata: dict[str, Any]
-    ) -> bool:
-        """
-        Detect chunks of article 133.1 even if metadata says 133.
-        """
-
-        haystack = " ".join(
-            [
-                text or "",
-                " ".join(str(value) for value in metadata.values()),
-            ]
-        ).lower()
-
-        if "133.1" in haystack or "133_1" in haystack:
-            return True
-
-        return any(
-            marker in haystack
-            for marker in cls.REGIONAL_MIN_WAGE_MARKERS
-        )
-
-    @classmethod
-    def normalize_payload(
-            cls,
-            payload: dict[str, Any],
-            *,
-            text: str = ""
-    ) -> dict[str, Any]:
-        """
-        Normalize article_number inside payload.
-        """
-
-        payload = dict(payload or {})
-
-        article = cls.normalize(
-            payload.get("article_number") or payload.get("article"),
-            text=text,
-            metadata=payload
-        )
-
-        if article is not None:
-            payload["article_number"] = article
-
-        return payload
-
-
 class ChunkAdapter:
     """
     Converts project chunks into plain fields and LlamaIndex documents.
@@ -345,16 +200,13 @@ class ChunkAdapter:
 
         metadata = cls.metadata_to_dict(metadata_raw)
 
-        text = cls.extract_text(chunk)
-
-        article_number = ArticleIdNormalizer.normalize(
-            metadata.get("article_number") or metadata.get("article"),
-            text=text,
-            metadata=metadata
+        article_number = (
+            metadata.get("article_number")
+            or metadata.get("article")
         )
 
         if article_number is not None:
-            metadata["article_number"] = article_number
+            metadata["article_number"] = str(article_number).strip()
 
         header = metadata.get("header")
 
@@ -441,11 +293,15 @@ class QdrantDenseRetriever(BaseDenseRetriever):
             result = SearchResult.from_qdrant(hit)
 
             if result.text and result.text.strip():
-                result.payload = ArticleIdNormalizer.normalize_payload(
-                    result.payload or {},
-                    text=result.text or ""
-                )
+                result.payload = result.payload or {}
                 result.payload["retrieval_source"] = "dense"
+
+                article_number = result.payload.get("article_number")
+
+                if article_number is not None:
+                    result.payload["article_number"] = str(
+                        article_number
+                    ).strip()
 
                 results.append(result)
 
@@ -534,11 +390,13 @@ class BM25SparseRetriever(BaseSparseRetriever):
                 continue
 
             document = self.documents[index]
-            payload = ArticleIdNormalizer.normalize_payload(
-                dict(document.metadata or {}),
-                text=document.text
-            )
+            payload = dict(document.metadata or {})
             payload["retrieval_source"] = "bm25"
+
+            article_number = payload.get("article_number")
+
+            if article_number is not None:
+                payload["article_number"] = str(article_number).strip()
 
             result = SearchResultFactory.create(
                 id=f"bm25:{index}",
@@ -605,14 +463,7 @@ class LlamaIndexMetadataGraphRetriever(BaseGraphRetriever):
             if article is None:
                 continue
 
-            article = ArticleIdNormalizer.normalize(
-                article,
-                text=document.text,
-                metadata=metadata
-            )
-
-            if article is None:
-                continue
+            article = str(article).strip()
 
             self.article_to_docs.setdefault(article, []).append(index)
             self.article_graph.setdefault(article, set())
@@ -781,10 +632,7 @@ class LlamaIndexMetadataGraphRetriever(BaseGraphRetriever):
             for doc_index in doc_indexes:
                 document = self.documents[doc_index]
 
-                payload = ArticleIdNormalizer.normalize_payload(
-                    dict(document.metadata or {}),
-                    text=document.text
-                )
+                payload = dict(document.metadata or {})
                 payload["article_number"] = str(article)
                 payload["retrieval_source"] = "graph"
 
