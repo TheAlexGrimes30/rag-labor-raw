@@ -14,12 +14,12 @@ from classic_rag.Dense.generator import (
     ContextCleaner,
 )
 from classic_rag.Dense.index_service import IndexService
-from classic_rag.Dense.ingestion import (
+from RAG_base.chunck_generation.ingestion import (
     IngestionPipeline,
     MarkdownDocumentLoader,
     IngestionService,
 )
-from classic_rag.Dense.rag_chunkers import HybridLegalChunker
+from RAG_base.chunck_generation.rag_chunkers import HybridLegalChunker
 from classic_rag.Dense.rag_dataset import dataset
 from classic_rag.Dense.rag_service import RAGService
 from classic_rag.Dense.reranker import Reranker

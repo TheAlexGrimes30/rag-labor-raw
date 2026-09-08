@@ -4,67 +4,28 @@ from pathlib import Path
 from typing import List, Tuple, Dict
 
 import yaml
-from langchain_core.documents import Document
 
 from RAG_base.chunck_generation.chunck_config import Chunk
 
 
 class BaseDocumentLoader(ABC):
-    """
-    Abstract base class for document loaders.
-
-    Defines the common interface for loading documents
-    from any source (Markdown, PDF, database, API, etc.).
-    """
 
     @abstractmethod
-    def load(self) -> list[Document]:
-        """
-        Load documents from a source.
-
-        Returns:
-            List[Document]:
-                List of LangChain Document objects.
-        """
-
+    def load(self) -> list[Path]:
         raise NotImplementedError
 
-class BasePipeline(ABC):
-    """
-    Abstract base class for ingestion pipelines.
 
-    Defines the interface for document processing pipelines.
-    """
+class BasePipeline(ABC):
 
     @abstractmethod
     def run(self) -> list[Chunk]:
-        """
-        Execute pipeline processing.
-
-        Returns:
-            List[Chunk]:
-                List of processed chunks.
-        """
-
         raise NotImplementedError
 
-class BaseIngestionService(ABC):
-    """
-    Abstract base class for ingestion services.
 
-    Defines high-level ingestion operations.
-    """
+class BaseIngestionService(ABC):
 
     @abstractmethod
     def load_chunks(self) -> list[Chunk]:
-        """
-        Load processed chunks from pipeline.
-
-        Returns:
-            List[Chunk]:
-                List of generated chunks.
-        """
-
         raise NotImplementedError
 
 
