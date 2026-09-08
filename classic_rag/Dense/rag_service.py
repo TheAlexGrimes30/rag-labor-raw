@@ -1,7 +1,7 @@
 import re
 from typing import List, Set
 
-from classic_rag.Dense.rag_config import RAGResponse
+from RAG_base.chunck_generation.chunck_config import RAGResponse
 from classic_rag.Dense.search_result import SearchResult
 
 

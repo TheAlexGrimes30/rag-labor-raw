@@ -6,7 +6,7 @@ from typing import List, Tuple, Dict
 import yaml
 from langchain_core.documents import Document
 
-from classic_rag.Dense.rag_config import Chunk
+from RAG_base.chunck_generation.chunck_config import Chunk
 
 
 class BaseDocumentLoader(ABC):

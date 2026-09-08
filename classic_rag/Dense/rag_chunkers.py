@@ -4,7 +4,7 @@ import hashlib
 from chonkie import SentenceChunker
 from chonkie.refinery import OverlapRefinery
 
-from classic_rag.Dense.rag_config import ChunkMetadata, Chunk
+from RAG_base.chunck_generation.chunck_config import ChunkMetadata, Chunk
 
 
 class Sectioner:
