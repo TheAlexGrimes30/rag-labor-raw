@@ -1,6 +1,4 @@
 import re
-import hashlib
-
 from chonkie import RecursiveChunker
 from chonkie.refinery import OverlapRefinery
 
@@ -9,237 +7,148 @@ from RAG_base.chunck_generation.chunck_config import (
     Chunk
 )
 
-
 class Sectioner:
-    """
-    Парсер секций Markdown-документа.
+    """Разделяет Markdown на секции и сохраняет путь родительских заголовков."""
 
-    Разбивает Markdown-документ на иерархические секции
-    на основе заголовков уровней H1–H6.
+    _HEADING_PATTERN = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$")
 
-    Каждая секция содержит:
-    - текст заголовка
-    - уровень заголовка
-    - строки содержимого, расположенные под этим заголовком
-
-    Используется как этап предварительной обработки
-    перед созданием чанков.
-    """
-
-    def extract_sections(
-        self,
-        text: str
-    ) -> list[dict]:
-        """
-        Извлекает секции из Markdown-документа.
-
-        Аргументы:
-            text (str):
-                Исходный Markdown-документ.
-
-        Возвращает:
-            list[dict]:
-                Список секций.
-        """
-
-        sections = []
-
-        current = {
-            "header": None,
-            "level": 0,
-            "content": []
-        }
+    def extract_sections(self, text: str) -> list[dict]:
+        sections: list[dict] = []
+        headings: list[tuple[int, str]] = []
+        current = {"header": None, "level": None, "content": [], "heading_path": []}
+        in_fence = False
+        fence_char = None
+        fence_len = 0
 
         for line in text.splitlines():
+            stripped = line.strip()
+            fence = re.match(r"^(`{3,}|~{3,})", stripped)
 
-            line = line.rstrip()
+            if fence:
+                marker = fence.group(1)
 
-            match = re.match(
-                r"^(#{1,6})\s+(.+)",
-                line
-            )
+                if not in_fence:
+                    in_fence, fence_char, fence_len = True, marker[0], len(marker)
+
+                elif marker[0] == fence_char and len(marker) >= fence_len:
+                    in_fence, fence_char, fence_len = False, None, 0
+
+                current["content"].append(line.rstrip())
+                continue
+
+            match = None if in_fence else self._HEADING_PATTERN.match(line)
 
             if match:
+                if any(part.strip() for part in current["content"]):
+                    sections.append(current)
 
-                if current["content"]:
+                level = len(match.group(1))
+                header = match.group(2).strip()
 
-                    sections.append(
-                        current
-                    )
+                while headings and headings[-1][0] >= level:
+                    headings.pop()
+
+                headings.append((level, header))
 
                 current = {
-                    "header": (
-                        match
-                        .group(2)
-                        .strip()
-                    ),
-                    "level": len(
-                        match.group(1)
-                    ),
-                    "content": []
+                    "header": header,
+                    "level": level,
+                    "content": [],
+                    "heading_path": [name for _, name in headings],
                 }
 
             else:
+                current["content"].append(line.rstrip())
 
-                current["content"].append(
-                    line
-                )
-
-        if current["content"]:
-
-            sections.append(
-                current
-            )
-
+        if any(part.strip() for part in current["content"]):
+            sections.append(current)
         return sections
 
 
 class ContextInjector:
-    """
-    Добавляет юридический контекст
-    непосредственно в готовый чанк.
-
-    Каждый чанк получает:
-    - номер статьи
-    - заголовок секции
-
-    Благодаря этому каждый чанк является
-    самостоятельной единицей для retrieval.
-    """
+    """Добавляет название акта, номер статьи и путь заголовков перед чанком."""
 
     def inject(
         self,
         article_number: str | None,
         header: str | None,
-        text: str
+        text: str,
+        source: str | None = None,
+        heading_path: list[str] | None = None,
     ) -> str:
 
-        context = []
+        context: list[str] = []
 
-        if article_number:
+        if source and source.strip() and source.strip().lower() != "unknown":
+            context.append(source.strip())
 
-            context.append(
-                f"Статья {article_number}"
-            )
+        path = heading_path if heading_path is not None else ([header] if header else [])
 
-        if header:
-
-            context.append(
-                header
-            )
-
-        ctx = " > ".join(
-            context
+        article_heading = any(
+            re.match(r"^Статья\s+\d+(?:\.\d+)*\b", item, re.IGNORECASE)
+            for item in path
         )
 
-        if not ctx:
+        if article_number and not article_heading:
+            context.append(f"Статья {article_number}")
 
+        context.extend(item.strip() for item in path if item and item.strip())
+
+        if not context:
             return text
 
-        return (
-            f"[{ctx}]\n\n"
-            f"{text}"
-        )
+        return f"[{' > '.join(context)}]\n\n{text}"
 
 
 class ChunkValidator:
-    """
-    Проверяет качество итогового чанка.
-    """
+    """Проверяет исходное содержимое чанка до добавления контекста."""
 
-    def __init__(
-        self,
-        min_chars: int = 50,
-        min_words: int = 7
-    ):
-
+    def __init__(self, min_chars: int = 50, min_words: int = 7):
         self.min_chars = min_chars
         self.min_words = min_words
 
-    def is_valid(
-        self,
-        text: str
-    ) -> bool:
-
+    def is_valid(self, text: str) -> bool:
         text = text.strip()
 
-        if not text:
-
+        if not text or len(text) < self.min_chars:
             return False
 
-        if len(text) < self.min_chars:
-
+        if len(text.split()) < self.min_words:
             return False
 
-        if (
-            len(text.split())
-            < self.min_words
-        ):
+        alpha_count = sum(char.isalpha() for char in text)
 
-            return False
-
-        alpha_count = sum(
-            char.isalpha()
-            for char in text
-        )
-
-        alpha_ratio = (
-            alpha_count
-            / max(
-                len(text),
-                1
-            )
-        )
-
-        return (
-            alpha_ratio >= 0.25
-        )
+        return alpha_count / len(text) >= 0.25
 
 
 class HybridLegalChunker:
+    """Markdown -> секции -> Chonkie -> overlap -> validation -> context -> Chunk.
     """
-    Гибридный chunker
-    для юридических Markdown-документов.
 
-    Пайплайн:
+    _ARTICLE_IN_HEADER = re.compile(
+        r"\bСтатья\s+(\d+(?:\.\d+)*(?:-\d+)?)\b",
+        re.IGNORECASE
+    )
 
-        Markdown
-            ↓
-        Sectioner
-            ↓
-        юридическая секция
-            ↓
-        нормализация текста
-            ↓
-        RecursiveChunker
-            ↓
-        структурные чанки
-            ↓
-        OverlapRefinery
-            ↓
-        ContextInjector
-            ↓
-        ChunkValidator
-            ↓
-        Chunk + ChunkMetadata
-
-    Основной принцип:
-
-    сначала сохраняется структура документа,
-    затем Chonkie делит текст по естественным
-    логическим границам.
-    """
+    _ARTICLE_IN_ID = re.compile(
+        r"(?:^|_)article_(\d+(?:_\d+)*)(?=_|$)",
+        re.IGNORECASE
+    )
 
     def __init__(
         self,
         chunk_size: int = 350,
-        overlap_size: int = 50
+        overlap_size: int = 50,
+        min_chars: int = 50,
+        min_words: int = 7,
     ):
+        if chunk_size <= 0 or overlap_size < 0:
+            raise ValueError("chunk_size должен быть > 0, overlap_size должен быть >= 0")
 
         self.splitter = RecursiveChunker(
             tokenizer="word",
             chunk_size=chunk_size,
-            min_characters_per_chunk=50
+            min_characters_per_chunk=min_chars,
         )
 
         self.refinery = OverlapRefinery(
@@ -247,401 +156,148 @@ class HybridLegalChunker:
             method="suffix",
             mode="recursive",
             merge=True,
-            inplace=True
-        )
+            inplace=True,
+        ) if overlap_size else None
 
         self.sectioner = Sectioner()
-
         self.injector = ContextInjector()
-
-        self.validator = ChunkValidator(
-            min_chars=50,
-            min_words=7
-        )
-
-        self.global_chunk_index = 0
+        self.validator = ChunkValidator(min_chars=min_chars, min_words=min_words)
 
     def _extract_article(
-        self,
-        header: str | None,
-        frontmatter: dict
+            self,
+            header: str | None,
+            frontmatter: dict,
     ) -> str | None:
-        """
-        Извлекает номер статьи.
 
-        Поддерживает номера:
+        yaml_article = frontmatter.get("article")
+        yaml_number = (
+            str(yaml_article).strip()
+            if yaml_article is not None
+            else None
+        )
 
-            1
-            165
-            327.1
-            351.7
-        """
+        header_match = self._ARTICLE_IN_HEADER.search(header or "")
+        header_number = header_match.group(1) if header_match else None
 
-        if header:
+        doc_id = str(frontmatter.get("id") or "")
+        id_match = self._ARTICLE_IN_ID.search(doc_id)
 
-            match = re.search(
-                r"Статья\s+"
-                r"(\d+(?:\.\d+)*)",
-                header
-            )
+        id_number = (
+            id_match.group(1).replace("_", ".")
+            if id_match
+            else None
+        )
 
-            if match:
-
-                return (
-                    match.group(1)
+        # YAML — основной источник номера статьи.
+        if yaml_number:
+            if header_number and yaml_number != header_number:
+                raise ValueError(
+                    f"Несовпадение номера статьи: "
+                    f"YAML={yaml_number}, header={header_number}"
                 )
 
-        doc_id = frontmatter.get(
-            "id",
-            ""
-        )
+            return yaml_number
 
-        match = re.search(
-            r"article_"
-            r"(\d+(?:\.\d+)*)",
-            doc_id
-        )
+        # Если YAML отсутствует, используем заголовок.
+        if header_number:
+            return header_number
 
-        if match:
+        # Последний резервный источник — ID.
+        return id_number
 
-            return (
-                match.group(1)
-            )
+    def _prepare_legal_text(self, text: str) -> str:
 
-        article = frontmatter.get(
-            "article"
-        )
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = re.sub(r"[ \t]+(?=\n)", "", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        return text.strip()
 
-        if article is None:
-
-            return None
-
-        return str(
-            article
-        )
-
-    def _make_chunk_id(
-        self,
-        text: str,
-        filepath: str,
-        article_number: str | None,
-        header: str | None
-    ) -> str:
-        """
-        Создаёт детерминированный ID чанка.
-
-        ID не зависит от глобального индекса,
-        поэтому меньше меняется при повторной
-        индексации документов.
-        """
-
-        raw = "|".join(
-            [
-                filepath,
-                str(
-                    article_number or ""
-                ),
-                str(
-                    header or ""
-                ),
-                text
-            ]
-        )
-
-        return hashlib.md5(
-            raw.encode(
-                "utf-8"
-            )
-        ).hexdigest()
-
-    def _prepare_legal_text(
-        self,
-        text: str
-    ) -> str:
-        """
-        Нормализует юридический текст.
-
-        Важно:
-        переносы строк сохраняются,
-        потому что они содержат структуру:
-
-        - абзацы
-        - списки
-        - подпункты
-        """
-
-        text = text.replace(
-            "\r\n",
-            "\n"
-        )
-
-        text = re.sub(
-            r"\n{3,}",
-            "\n\n",
-            text
-        )
-
-        text = re.sub(
-            r"[ \t]+",
-            " ",
-            text
-        )
-
-        text = re.sub(
-            r"^\s*---+\s*$",
-            "",
-            text,
-            flags=re.MULTILINE
-        )
-
-        return (
-            text.strip()
-        )
-
-    def _extract_chunk_text(
-        self,
-        chunk
-    ) -> str:
-        """
-        Извлекает текст
-        из Chonkie Chunk.
-        """
-
-        if hasattr(
-            chunk,
-            "text"
-        ):
-
-            return (
-                chunk.text.strip()
-            )
-
-        return (
-            str(chunk)
-            .strip()
-        )
+    def _extract_chunk_text(self, chunk) -> str:
+        return (chunk.text if hasattr(chunk, "text") else str(chunk)).strip()
 
     def process_section(
         self,
         section: dict,
         base_metadata: ChunkMetadata,
-        filepath: str
+        filepath: str,
+        start_index: int = 0,
     ) -> list[Chunk]:
-        """
-        Преобразует одну Markdown-секцию
-        в набор юридических чанков.
-        """
+        """Обрабатывает секцию, сохраняя формат существующих Chunk/ChunkMetadata."""
 
-        header = (
-            section["header"]
-        )
-
-        raw_text = "\n".join(
-            section["content"]
-        )
-
-        raw_text = (
-            raw_text.strip()
-        )
+        header = section.get("header")
+        raw_text = "\n".join(section.get("content", [])).strip()
 
         if not raw_text:
-
             return []
 
-        article_number = (
-            base_metadata
-            .article_number
-        )
+        text = self._prepare_legal_text(raw_text)
+        parts = self.splitter.chunk(text)
 
-        text = (
-            self._prepare_legal_text(
-                raw_text
-            )
-        )
+        if self.refinery is not None and len(parts) > 1:
+            parts = self.refinery.refine(parts)
 
-        chonkie_chunks = (
-            self.splitter.chunk(
-                text
-            )
-        )
-
-        if (
-            len(chonkie_chunks)
-            > 1
-        ):
-
-            chonkie_chunks = (
-                self.refinery.refine(
-                    chonkie_chunks
-                )
-            )
-
-        results = []
-
-        for chonkie_chunk in (
-            chonkie_chunks
-        ):
-
-            part = (
-                self._extract_chunk_text(
-                    chonkie_chunk
-                )
-            )
-
-            if not part:
-
+        results: list[Chunk] = []
+        for part_obj in parts:
+            part = self._extract_chunk_text(part_obj)
+            if not self.validator.is_valid(part):
                 continue
 
-            part = (
-                self.injector.inject(
-                    article_number,
-                    header,
-                    part
-                )
-            )
-
-            if not (
-                self.validator
-                .is_valid(part)
-            ):
-
-                continue
-
-            idx = (
-                self.global_chunk_index
-            )
-
-            chunk_id = (
-                self._make_chunk_id(
-                    text=part,
-                    filepath=filepath,
-                    article_number=(
-                        article_number
-                    ),
-                    header=header
-                )
+            contextual_text = self.injector.inject(
+                article_number=base_metadata.article_number,
+                header=header,
+                text=part,
+                source=base_metadata.source,
+                heading_path=section.get("heading_path"),
             )
 
             metadata = ChunkMetadata(
-                source=(
-                    base_metadata.source
-                ),
-                file=(
-                    base_metadata.file
-                ),
+                source=base_metadata.source,
+                file=base_metadata.file,
                 header=header,
-                level=(
-                    base_metadata.level
-                ),
-                article_number=(
-                    article_number
-                ),
-                chunk_index=idx,
-                topics=(
-                    base_metadata.topics
-                )
+                level=section.get("level"),
+                article_number=base_metadata.article_number,
+                chunk_index=start_index + len(results),
+                topics=list(base_metadata.topics),
             )
 
-            results.append(
-                Chunk(
-                    chunk_id=chunk_id,
-                    text=part,
-                    metadata=metadata
-                )
-            )
-
-            self.global_chunk_index += 1
-
+            results.append(Chunk(text=contextual_text, metadata=metadata))
         return results
 
     def create_chunks(
         self,
         sections: list[dict],
         frontmatter: dict,
-        filepath: str
+        filepath: str,
     ) -> list[Chunk]:
-        """
-        Создаёт чанки
-        для всех секций документа.
-        """
+        """Собирает чанки документа с нумерацией от нуля."""
 
-        all_chunks = []
+        all_chunks: list[Chunk] = []
+        classic_rag = frontmatter.get("classic_rag") or {}
+        topics = classic_rag.get("topics") or []
 
         for section in sections:
-
-            article_number = (
-                self._extract_article(
-                    section["header"],
-                    frontmatter
-                )
-            )
+            article_number = self._extract_article(section.get("header"), frontmatter)
 
             metadata = ChunkMetadata(
-                source=frontmatter.get(
-                    "source",
-                    "unknown"
-                ),
+                source=str(frontmatter.get("source") or frontmatter.get("law") or "unknown"),
                 file=filepath,
-                header=(
-                    section["header"]
-                ),
-                level=(
-                    section["level"]
-                ),
-                article_number=(
-                    article_number
-                ),
+                header=section.get("header"),
+                level=section.get("level"),
+                article_number=article_number,
                 chunk_index=None,
-                topics=(
-                    (
-                        frontmatter.get(
-                            "classic_rag",
-                            {}
-                        )
-                        or {}
-                    )
-                    .get(
-                        "topics",
-                        []
-                    )
-                )
-            )
-
-            section_chunks = (
-                self.process_section(
-                    section=section,
-                    base_metadata=metadata,
-                    filepath=filepath
-                )
+                topics=list(topics),
             )
 
             all_chunks.extend(
-                section_chunks
+                self.process_section(
+                    section=section,
+                    base_metadata=metadata,
+                    filepath=filepath,
+                    start_index=len(all_chunks),
+                )
             )
-
         return all_chunks
 
-    def process(
-        self,
-        filepath: str,
-        frontmatter: dict,
-        body: str
-    ) -> list[Chunk]:
-        """
-        Основная точка входа.
-        """
-
-        sections = (
-            self.sectioner
-            .extract_sections(
-                body
-            )
-        )
-
-        return (
-            self.create_chunks(
-                sections=sections,
-                frontmatter=frontmatter,
-                filepath=filepath
-            )
-        )
+    def process(self, filepath: str, frontmatter: dict, body: str) -> list[Chunk]:
+        sections = self.sectioner.extract_sections(body)
+        return self.create_chunks(sections, frontmatter, filepath)

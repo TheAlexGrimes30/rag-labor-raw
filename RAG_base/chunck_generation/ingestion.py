@@ -1,35 +1,12 @@
 import re
-from abc import abstractmethod, ABC
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import List
 
 import yaml
 
 from RAG_base.chunck_generation.chunck_config import Chunk
 
-
-class BaseDocumentLoader(ABC):
-
-    @abstractmethod
-    def load(self) -> list[Path]:
-        raise NotImplementedError
-
-
-class BasePipeline(ABC):
-
-    @abstractmethod
-    def run(self) -> list[Chunk]:
-        raise NotImplementedError
-
-
-class BaseIngestionService(ABC):
-
-    @abstractmethod
-    def load_chunks(self) -> list[Chunk]:
-        raise NotImplementedError
-
-
-class MarkdownDocumentLoader(BaseDocumentLoader):
+class MarkdownDocumentLoader:
     """
     Loader for Markdown documents.
 
@@ -44,38 +21,11 @@ class MarkdownDocumentLoader(BaseDocumentLoader):
         self.data_dir = Path(data_dir)
 
     def load(self) -> list[Path]:
-        """
-        Load all markdown file paths from directory recursively.
-
-        Returns:
-            list[Path]:
-                List of markdown file paths.
-        """
-
         return list(self.data_dir.rglob("*.md"))
 
     def parse_file(self, path: str) -> tuple[dict, str]:
-        """
-        Parse markdown file into frontmatter metadata and body.
-
-        Supports YAML frontmatter in format:
-
-            key: value
-            markdown content
-
-        Args:
-            path (str):
-                Path to markdown file.
-
-        Returns:
-            Tuple[Dict, str]:
-                Tuple containing:
-                    - parsed YAML frontmatter metadata
-                    - markdown body text
-        """
 
         text = Path(path).read_text(encoding="utf-8")
-
         match = re.match(r'^---\n(.*?)\n---\n(.*)$', text, re.DOTALL)
 
         if match:
@@ -87,7 +37,7 @@ class MarkdownDocumentLoader(BaseDocumentLoader):
 
         return frontmatter, body
 
-class IngestionPipeline(BasePipeline):
+class IngestionPipeline:
     """
     Main ingestion pipeline.
 
@@ -120,7 +70,6 @@ class IngestionPipeline(BasePipeline):
         chunks = []
 
         for path in self.loader.load():
-
             frontmatter, body = self.loader.parse_file(str(path))
 
             chunks.extend(
@@ -133,7 +82,7 @@ class IngestionPipeline(BasePipeline):
 
         return [c for c in chunks if c.text.strip()]
 
-class IngestionService(BaseIngestionService):
+class IngestionService:
     """
     High-level ingestion service.
 

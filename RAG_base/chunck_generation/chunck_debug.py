@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from RAG_base.chunck_generation.ingestion import MarkdownDocumentLoader, IngestionPipeline, IngestionService
+from RAG_base.chunck_generation.ingestion import IngestionService, IngestionPipeline, MarkdownDocumentLoader
 from RAG_base.chunck_generation.rag_chunkers import HybridLegalChunker
 
 
