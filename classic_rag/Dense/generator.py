@@ -56,6 +56,7 @@ class QwenClient(BaseLLMClient):
         self.llm = Llama(
             model_path=str(model_path),
             n_ctx=4096,
+            n_gpu_layers=-1,
             n_threads=8,
             verbose=False
         )
